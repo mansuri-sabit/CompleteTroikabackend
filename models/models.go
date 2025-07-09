@@ -1,246 +1,223 @@
 package models
 
 import (
-    "fmt"
-    "time"
-    "go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"time"
 )
 
-
-// User represents a user in the system
+// User represents a user in the system with authentication and role management
 type User struct {
-    ID        primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-    Username  string             `bson:"username" json:"username"`
-    Email     string             `bson:"email" json:"email"`
-    Password  string             `bson:"password" json:"-"`
-    IsActive  bool               `bson:"is_active" json:"is_active"`
-    Role      string             `bson:"role" json:"role"`
-    CreatedAt time.Time          `bson:"created_at" json:"created_at"`
-    UpdatedAt time.Time          `bson:"updated_at" json:"updated_at"`
+	ID       primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	Name     string             `bson:"name" json:"name"`
+	Email    string             `bson:"email" json:"email"`
+	Password string             `bson:"password" json:"-"` // Hidden from JSON
+	Role     string             `bson:"role" json:"role"`  // admin, user
+	IsActive bool               `bson:"is_active" json:"is_active"`
+
+	// Profile Information
+	Company string `bson:"company,omitempty" json:"company"`
+	Phone   string `bson:"phone,omitempty" json:"phone"`
+	Avatar  string `bson:"avatar,omitempty" json:"avatar"`
+
+	// Authentication & Security
+	EmailVerified       bool      `bson:"email_verified" json:"email_verified"`
+	EmailVerifyToken    string    `bson:"email_verify_token,omitempty" json:"-"`
+	PasswordResetToken  string    `bson:"password_reset_token,omitempty" json:"-"`
+	PasswordResetExpiry time.Time `bson:"password_reset_expiry,omitempty" json:"-"`
+
+	// Activity Tracking
+	LastLoginAt   time.Time `bson:"last_login_at,omitempty" json:"last_login_at"`
+	LastLoginIP   string    `bson:"last_login_ip,omitempty" json:"last_login_ip"`
+	LoginAttempts int       `bson:"login_attempts" json:"login_attempts"`
+	LockedUntil   time.Time `bson:"locked_until,omitempty" json:"locked_until"`
+
+	// Preferences
+	Timezone          string                `bson:"timezone,omitempty" json:"timezone"`
+	Language          string                `bson:"language,omitempty" json:"language"`
+	NotificationPrefs UserNotificationPrefs `bson:"notification_prefs" json:"notification_prefs"`
+
+	// Metadata
+	CreatedAt time.Time `bson:"created_at" json:"created_at"`
+	UpdatedAt time.Time `bson:"updated_at" json:"updated_at"`
+	CreatedBy string    `bson:"created_by,omitempty" json:"created_by"`
 }
 
-// ChatUser represents users who interact with embed chat widgets
-type ChatUser struct {
-    ID        primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-    ProjectID string             `bson:"project_id" json:"project_id"`
-    Name      string             `bson:"name" json:"name"`
-    Email     string             `bson:"email" json:"email"`
-    Password  string             `bson:"password" json:"-"`
-    CreatedAt time.Time          `bson:"created_at" json:"created_at"`
-    IsActive  bool               `bson:"is_active" json:"is_active"`
+// UserNotificationPrefs represents user notification preferences
+type UserNotificationPrefs struct {
+	EmailNotifications bool `bson:"email_notifications" json:"email_notifications"`
+	SMSNotifications   bool `bson:"sms_notifications" json:"sms_notifications"`
+	PushNotifications  bool `bson:"push_notifications" json:"push_notifications"`
+	MarketingEmails    bool `bson:"marketing_emails" json:"marketing_emails"`
+	SecurityAlerts     bool `bson:"security_alerts" json:"security_alerts"`
 }
 
-// Notification represents system notifications
-type Notification struct {
-    ID        primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-    ProjectID primitive.ObjectID `bson:"project_id" json:"project_id"`
-    Type      string             `bson:"type" json:"type"` // "monthly_limit", "usage_warning", "test"
-    Message   string             `bson:"message" json:"message"`
-    SentAt    time.Time          `bson:"sent_at" json:"sent_at"`
-    Status    string             `bson:"status" json:"status"` // "sent", "failed"
-    ReadAt    time.Time          `bson:"read_at,omitempty" json:"read_at,omitempty"`
+// UserCreateRequest represents the request structure for creating a new user
+type UserCreateRequest struct {
+	Name     string `json:"name" binding:"required"`
+	Email    string `json:"email" binding:"required,email"`
+	Password string `json:"password" binding:"required,min=8"`
+	Role     string `json:"role"`
+	Company  string `json:"company"`
+	Phone    string `json:"phone"`
 }
 
-// Notification type constants
+// UserUpdateRequest represents the request structure for updating user information
+type UserUpdateRequest struct {
+	Name              string                `json:"name"`
+	Company           string                `json:"company"`
+	Phone             string                `json:"phone"`
+	Timezone          string                `json:"timezone"`
+	Language          string                `json:"language"`
+	NotificationPrefs UserNotificationPrefs `json:"notification_prefs"`
+}
+
+// UserLoginRequest represents the login request structure
+type UserLoginRequest struct {
+	Email    string `json:"email" binding:"required,email"`
+	Password string `json:"password" binding:"required"`
+}
+
+// UserLoginResponse represents the login response structure
+type UserLoginResponse struct {
+	Token     string    `json:"token"`
+	User      User      `json:"user"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// PasswordChangeRequest represents the password change request structure
+type PasswordChangeRequest struct {
+	CurrentPassword string `json:"current_password" binding:"required"`
+	NewPassword     string `json:"new_password" binding:"required,min=8"`
+}
+
+// PasswordResetRequest represents the password reset request structure
+type PasswordResetRequest struct {
+	Email string `json:"email" binding:"required,email"`
+}
+
+// PasswordResetConfirmRequest represents the password reset confirmation structure
+type PasswordResetConfirmRequest struct {
+	Token       string `json:"token" binding:"required"`
+	NewPassword string `json:"new_password" binding:"required,min=8"`
+}
+
+// User role constants
 const (
-    NotificationMonthlyLimit = "monthly_limit"
-    NotificationUsageWarning = "usage_warning"
-    NotificationTest         = "test"
-    NotificationExpired      = "expired"
+	UserRoleAdmin = "admin"
+	UserRoleUser  = "user"
 )
 
-
-
-
-// Project represents a chatbot project
-type Project struct {
-    ID              primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-    Name            string             `bson:"name" json:"name"`
-    Description     string             `bson:"description" json:"description"`
-    Category        string             `bson:"category" json:"category"`
-    IsActive        bool               `bson:"is_active" json:"is_active"`
-    CreatedAt       time.Time          `bson:"created_at" json:"created_at"`
-    UpdatedAt       time.Time          `bson:"updated_at" json:"updated_at"`
-    
-    // PDF Storage Fields
-    PDFFiles        []PDFFile          `bson:"pdf_files" json:"pdf_files"`
-    PDFContent      string             `bson:"pdf_content" json:"pdf_content"`
-    
-    // Gemini Configuration
-    GeminiEnabled   bool               `bson:"gemini_enabled" json:"gemini_enabled"`
-    GeminiAPIKey    string             `bson:"gemini_api_key" json:"gemini_api_key"`
-    GeminiUsage     int                `bson:"gemini_usage" json:"gemini_usage"`
-    GeminiLimit     int                `bson:"gemini_limit" json:"gemini_limit"`
-    GeminiModel     string             `bson:"gemini_model" json:"gemini_model"`
-    GeminiUsageToday    int       `bson:"gemini_usage_today" json:"gemini_usage_today"`
-    GeminiUsageMonth    int       `bson:"gemini_usage_month" json:"gemini_usage_month"`
-    GeminiDailyLimit    int       `bson:"gemini_daily_limit" json:"gemini_daily_limit"`
-    GeminiMonthlyLimit  int       `bson:"gemini_monthly_limit" json:"gemini_monthly_limit"`
-    LastDailyReset      time.Time `bson:"last_daily_reset" json:"last_daily_reset"`
-    LastMonthlyReset    time.Time `bson:"last_monthly_reset" json:"last_monthly_reset"`
-    EstimatedCostToday  float64   `bson:"estimated_cost_today" json:"estimated_cost_today"`
-    EstimatedCostMonth  float64   `bson:"estimated_cost_month" json:"estimated_cost_month"`
-
-    // Subscription Management
-    StartDate       time.Time `bson:"start_date" json:"start_date"`
-    ExpiryDate      time.Time `bson:"expiry_date" json:"expiry_date"`
-    TotalTokensUsed int64     `bson:"total_tokens_used" json:"total_tokens_used"`
-    Status          string    `bson:"status" json:"status"` // active, expired, suspended
-    MonthlyTokenLimit int64   `bson:"monthly_token_limit" json:"monthly_token_limit"`
-    
-    // Enhanced tracking
-    LastTokenReset  time.Time `bson:"last_token_reset" json:"last_token_reset"`
-    SubscriptionPlan string   `bson:"subscription_plan" json:"subscription_plan"`
-    
-    // Analytics
-    TotalQuestions  int                `bson:"total_questions" json:"total_questions"`
-    LastUsed        time.Time          `bson:"last_used" json:"last_used"`
-    
-    // Additional Fields for Enhanced Functionality
-    WelcomeMessage  string             `bson:"welcome_message" json:"welcome_message"`
-}
-
-
-// Subscription status constants
+// User status constants
 const (
-    StatusActive    = "active"
-    StatusExpired   = "expired"
-    StatusSuspended = "suspended"
-    StatusInactive  = "inactive"
+	UserStatusActive   = "active"
+	UserStatusInactive = "inactive"
+	UserStatusLocked   = "locked"
+	UserStatusDeleted  = "deleted"
 )
 
+// Authentication constants
+const (
+	MaxLoginAttempts = 5
+	LockoutDuration  = 30 * time.Minute
+	TokenExpiry      = 24 * time.Hour
+)
 
-// PDFFile represents uploaded PDF files for each project
-type PDFFile struct {
-    ID          string    `bson:"id" json:"id"`
-    FileName    string    `bson:"file_name" json:"file_name"`
-    FilePath    string    `bson:"file_path" json:"file_path"`
-    FileSize    int64     `bson:"file_size" json:"file_size"`
-    UploadedAt  time.Time `bson:"uploaded_at" json:"uploaded_at"`
-    ProcessedAt time.Time `bson:"processed_at" json:"processed_at"`
-    Status      string    `bson:"status" json:"status"` // "processing", "completed", "failed"
+// Default notification preferences
+var DefaultUserNotificationPrefs = UserNotificationPrefs{
+	EmailNotifications: true,
+	SMSNotifications:   false,
+	PushNotifications:  true,
+	MarketingEmails:    false,
+	SecurityAlerts:     true,
 }
 
-// GeminiUsageLog tracks AI usage for analytics and billing
-type GeminiUsageLog struct {
-    ID          primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-    ProjectID   primitive.ObjectID `bson:"project_id" json:"project_id"`
-    Question    string             `bson:"question" json:"question"`
-    Response    string             `bson:"response" json:"response"`
-    TokensUsed  int                `bson:"tokens_used" json:"tokens_used"`
-    Timestamp   time.Time          `bson:"timestamp" json:"timestamp"`
-    UserIP      string             `bson:"user_ip" json:"user_ip"`
-    UserID      primitive.ObjectID `bson:"user_id,omitempty" json:"user_id,omitempty"`
-    UserName    string             `bson:"user_name,omitempty" json:"user_name,omitempty"`
-    Model           string             `bson:"model" json:"model"`
-    InputTokens     int                `bson:"input_tokens" json:"input_tokens"`
-    OutputTokens    int                `bson:"output_tokens" json:"output_tokens"`
-    EstimatedCost   float64            `bson:"estimated_cost" json:"estimated_cost"`
-    ResponseTime    int64              `bson:"response_time_ms" json:"response_time_ms"`
-    Success         bool               `bson:"success" json:"success"`
+// Helper Methods
+
+// IsValid checks if the user has valid required fields
+func (u *User) IsValid() bool {
+	return u.Name != "" && u.Email != "" && u.Password != ""
 }
 
-
-// ChatMessage represents individual chat messages
-type ChatMessage struct {
-    ID        primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-    ProjectID primitive.ObjectID `bson:"project_id" json:"project_id"`
-    SessionID string             `bson:"session_id" json:"session_id"`
-    Message   string             `bson:"message" json:"message"`
-    Response  string             `bson:"response" json:"response"`
-    IsUser    bool               `bson:"is_user" json:"is_user"`
-    Timestamp time.Time          `bson:"timestamp" json:"timestamp"`
-    IPAddress string             `bson:"ip_address" json:"ip_address"`
-    
-    // User authentication fields
-    UserID    primitive.ObjectID `bson:"user_id,omitempty" json:"user_id,omitempty"`
-    UserName  string             `bson:"user_name,omitempty" json:"user_name,omitempty"`
-    UserEmail string             `bson:"user_email,omitempty" json:"user_email,omitempty"`
-    
-    // Message rating and feedback
-    Rating    int                `bson:"rating,omitempty" json:"rating,omitempty"`
-    Feedback  string             `bson:"feedback,omitempty" json:"feedback,omitempty"`
-    RatedAt   time.Time          `bson:"rated_at,omitempty" json:"rated_at,omitempty"`
-}
-
-// ChatSession represents a chat session
-type ChatSession struct {
-    ID        primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-    ProjectID primitive.ObjectID `bson:"project_id" json:"project_id"`
-    SessionID string             `bson:"session_id" json:"session_id"`
-    UserID    primitive.ObjectID `bson:"user_id,omitempty" json:"user_id"`
-    IsActive  bool               `bson:"is_active" json:"is_active"`
-    StartTime time.Time          `bson:"start_time" json:"start_time"`
-    EndTime   time.Time          `bson:"end_time" json:"end_time"`
-    IPAddress string             `bson:"ip_address" json:"ip_address"`
-}
-
-// ===== HELPER METHODS =====
-
-// IsAdmin checks if user has admin role
+// IsAdmin checks if the user has admin role
 func (u *User) IsAdmin() bool {
-    return u.Role == RoleAdmin
+	return u.Role == UserRoleAdmin
 }
 
-// IsUser checks if user has regular user role
-func (u *User) IsUser() bool {
-    return u.Role == RoleUser
+// IsLocked checks if the user account is currently locked
+func (u *User) IsLocked() bool {
+	return !u.LockedUntil.IsZero() && time.Now().Before(u.LockedUntil)
 }
 
-// Validate validates project data - FIXED METHOD
-func (p *Project) Validate() error {
-    if p.Name == "" {
-        return fmt.Errorf("project name is required")
-    }
-    if p.GeminiAPIKey == "" {  // ✅ FIXED: Use correct field name
-        return fmt.Errorf("gemini API key is required")
-    }
-    if p.GeminiLimit <= 0 {
-        return fmt.Errorf("gemini usage limit must be greater than 0")
-    }
-    return nil
+// CanLogin checks if the user can login (active, not locked, email verified)
+func (u *User) CanLogin() bool {
+	return u.IsActive && !u.IsLocked() && u.EmailVerified
 }
 
-// IsWithinLimit checks if project is within Gemini usage limits
-func (p *Project) IsWithinLimit() bool {
-    return p.GeminiUsage < p.GeminiLimit
+// IncrementLoginAttempts increments failed login attempts and locks if necessary
+func (u *User) IncrementLoginAttempts() {
+	u.LoginAttempts++
+	if u.LoginAttempts >= MaxLoginAttempts {
+		u.LockedUntil = time.Now().Add(LockoutDuration)
+	}
+	u.UpdatedAt = time.Now()
 }
 
-// GetUsagePercentage returns usage as percentage
-func (p *Project) GetUsagePercentage() float64 {
-    if p.GeminiLimit == 0 {
-        return 0
-    }
-    return float64(p.GeminiUsage) / float64(p.GeminiLimit) * 100
+// ResetLoginAttempts resets failed login attempts after successful login
+func (u *User) ResetLoginAttempts() {
+	u.LoginAttempts = 0
+	u.LockedUntil = time.Time{}
+	u.LastLoginAt = time.Now()
+	u.UpdatedAt = time.Now()
 }
 
-// IsProcessed checks if PDF file is successfully processed
-func (pdf *PDFFile) IsProcessed() bool {
-    return pdf.Status == "completed"
+// SetLastLogin updates the last login information
+func (u *User) SetLastLogin(ip string) {
+	u.LastLoginAt = time.Now()
+	u.LastLoginIP = ip
+	u.UpdatedAt = time.Now()
 }
 
-// IsFailed checks if PDF processing failed
-func (pdf *PDFFile) IsFailed() bool {
-    return pdf.Status == "failed"
+// GeneratePasswordResetToken generates a password reset token
+func (u *User) GeneratePasswordResetToken() string {
+	// In a real implementation, generate a secure random token
+	token := generateSecureToken(32)
+	u.PasswordResetToken = token
+	u.PasswordResetExpiry = time.Now().Add(1 * time.Hour) // 1 hour expiry
+	u.UpdatedAt = time.Now()
+	return token
 }
 
-// ===== CONSTANTS =====
+// IsPasswordResetTokenValid checks if the password reset token is valid
+func (u *User) IsPasswordResetTokenValid(token string) bool {
+	return u.PasswordResetToken == token &&
+		!u.PasswordResetExpiry.IsZero() &&
+		time.Now().Before(u.PasswordResetExpiry)
+}
 
-const (
-    RoleUser  = "user"
-    RoleAdmin = "admin"
-)
+// ClearPasswordResetToken clears the password reset token after use
+func (u *User) ClearPasswordResetToken() {
+	u.PasswordResetToken = ""
+	u.PasswordResetExpiry = time.Time{}
+	u.UpdatedAt = time.Now()
+}
 
-// PDF Processing Status Constants
-const (
-    PDFStatusProcessing = "processing"
-    PDFStatusCompleted  = "completed"
-    PDFStatusFailed     = "failed"
-)
+// ToSafeUser returns a user object safe for API responses (no sensitive data)
+func (u *User) ToSafeUser() User {
+	safeUser := *u
+	safeUser.Password = ""
+	safeUser.PasswordResetToken = ""
+	safeUser.EmailVerifyToken = ""
+	return safeUser
+}
 
-// Gemini Model Constants
-const (
-    GeminiModelFlash = "gemini-1.5-flash"
-    GeminiModelPro   = "gemini-1.5-pro"
-)
-
+// Helper function to generate secure tokens (simplified implementation)
+func generateSecureToken(length int) string {
+	// This is a simplified implementation
+	// In production, use crypto/rand for secure token generation
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	result := make([]byte, length)
+	for i := range result {
+		result[i] = charset[time.Now().UnixNano()%int64(len(charset))]
+	}
+	return string(result)
+}

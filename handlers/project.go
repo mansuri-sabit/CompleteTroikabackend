@@ -1,603 +1,511 @@
 package handlers
 
 import (
-    "context"
-    "fmt"
-    "net/http"
-    "os"
-    "path/filepath"
-    "strings"
-    "time"
-    "log"
-    "github.com/gin-gonic/gin"
-    "go.mongodb.org/mongo-driver/bson"
-    "go.mongodb.org/mongo-driver/bson/primitive"
-    "github.com/google/generative-ai-go/genai"
-    "google.golang.org/api/option"
-    "jevi-chat/config"
-    "jevi-chat/models"
+	"context"
+	"crypto/rand"
+	"strconv"
+	"fmt"
+	"log"
+	"math/big"
+	"net/http"
+	"os"
+
+	"time"
+	"path/filepath"
+	"github.com/gin-gonic/gin"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	
+	"jevi-chat/config"
+	"jevi-chat/models"
+
+
 )
 
-// ===== PDF MANAGEMENT =====
-
-// UploadPDF - Enhanced PDF upload with multiple file support
-func UploadPDF(c *gin.Context) {
-    startTime := time.Now() // Add timing
-    projectID := c.Param("id")
+// CreateProject - Enhanced project creation with OpenAI integration
+func CreateProject(c *gin.Context) {
+    userID := c.GetString("user_id")
+    userEmail := c.GetString("user_email")
+    userRole := c.GetString("user_role")
     
-    // ✅ FIXED: Remove duplicate log
-    log.Printf("🔍 [DEBUG] Starting PDF upload for project: %s", projectID)
-    log.Printf("🔍 [DEBUG] Request method: %s", c.Request.Method)
-    log.Printf("🔍 [DEBUG] Content-Type: %s", c.Request.Header.Get("Content-Type"))
-    
-    objID, err := primitive.ObjectIDFromHex(projectID)
-    if err != nil {
-        log.Printf("❌ Invalid project ID: %s", projectID)
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
-        return
-    }
-
-    // Get project to check if it exists
-    collection := config.DB.Collection("projects")
-    var project models.Project
-    err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
-    if err != nil {
-        log.Printf("❌ Project not found: %s", projectID)
-        c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
-        return
-    }
-
-    log.Printf("✅ Project found: %s", project.Name)
-
-    // Handle multiple file upload
-    form, err := c.MultipartForm()
-    if err != nil {
-        log.Printf("❌ Failed to parse multipart form: %v", err)
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to parse form", "details": err.Error()})
-        return
-    }
-
-    // ✅ CRITICAL FIX: Use "files" to match React frontend
-    files := form.File["files"]
-    log.Printf("📄 Received %d files for processing", len(files))
-    
-    if len(files) == 0 {
-        log.Printf("❌ No files found in form data")
-        
-        // ✅ ENHANCED: Better debug information
-        var availableFields []string
-        for fieldName, fieldFiles := range form.File {
-            log.Printf("Available form field: %s with %d files", fieldName, len(fieldFiles))
-            availableFields = append(availableFields, fieldName)
-        }
-        
-        c.JSON(http.StatusBadRequest, gin.H{
-            "error": "No files uploaded",
-            "debug_info": map[string]interface{}{
-                "available_fields": availableFields,
-                "expected_field":   "files",
-            },
+    if userID == "" || userRole != "admin" {
+        c.JSON(http.StatusUnauthorized, gin.H{
+            "error": "Admin authentication required",
         })
         return
     }
 
-    var uploadedFiles []models.PDFFile
-    var allContent strings.Builder
-
-    // Create uploads directory if it doesn't exist
-    uploadDir := "./static/uploads"
-    if err := os.MkdirAll(uploadDir, 0755); err != nil {
-        log.Printf("❌ Failed to create upload directory: %v", err)
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create upload directory"})
+    // ✅ Handle multipart form data properly
+    err := c.Request.ParseMultipartForm(32 << 20) // 32MB max
+    if err != nil {
+        log.Printf("❌ Failed to parse multipart form: %v", err)
+        c.JSON(http.StatusBadRequest, gin.H{
+            "error": "Failed to parse form data",
+        })
         return
     }
 
-    for i, file := range files {
-        log.Printf("📄 Processing file %d/%d: %s", i+1, len(files), file.Filename)
+    // ✅ Extract form values directly
+    name := c.PostForm("name")
+    description := c.PostForm("description")
+    clientEmail := c.PostForm("client_email")
+    welcomeMessage := c.PostForm("welcome_message")
+    theme := c.PostForm("theme")
+    primaryColor := c.PostForm("primary_color")
+    
+    // Parse monthly token limit
+    monthlyTokenLimit := int64(100000) // default
+    if limitStr := c.PostForm("monthly_token_limit"); limitStr != "" {
+        if parsed, err := strconv.ParseInt(limitStr, 10, 64); err == nil {
+            monthlyTokenLimit = parsed
+        }
+    }
+
+    // ✅ Validate required fields
+    if name == "" {
+        log.Printf("❌ Project name is empty")
+        c.JSON(http.StatusBadRequest, gin.H{
+            "error": "Project name is required",
+        })
+        return
+    }
+
+    // Set defaults
+    if welcomeMessage == "" {
+        welcomeMessage = "Hello! How can I help you today?"
+    }
+    if theme == "" {
+        theme = "default"
+    }
+    if primaryColor == "" {
+        primaryColor = "#4f46e5"
+    }
+
+    // ✅ Handle PDF file uploads and processing
+    form, _ := c.MultipartForm()
+    files := form.File["pdf_files"]
+    
+    var pdfFiles []models.PDFFile
+    var combinedPDFContent string
+    
+    for _, file := range files {
+        // Validate file type
+        if file.Header.Get("Content-Type") != "application/pdf" {
+            c.JSON(http.StatusBadRequest, gin.H{
+                "error": fmt.Sprintf("File %s is not a PDF", file.Filename),
+            })
+            return
+        }
         
-        // Validate file type and size
-        if !strings.HasSuffix(strings.ToLower(file.Filename), ".pdf") {
-            log.Printf("⚠️ Skipping non-PDF file: %s", file.Filename)
-            continue
+        // Validate file size (10MB max)
+        if file.Size > 10*1024*1024 {
+            c.JSON(http.StatusBadRequest, gin.H{
+                "error": fmt.Sprintf("File %s exceeds 10MB limit", file.Filename),
+            })
+            return
         }
-        if file.Size > 10*1024*1024 { // 10MB limit
-            log.Printf("⚠️ Skipping oversized file: %s (size: %d bytes)", file.Filename, file.Size)
-            continue
-        }
-
-        // ✅ ENHANCED: Safer filename generation
+        
+        // Generate unique filename and save
         fileID := primitive.NewObjectID().Hex()
-        fileName := fmt.Sprintf("%s_%s", fileID, filepath.Base(file.Filename))
-        filePath := filepath.Join(uploadDir, fileName)
-
+        fileName := fmt.Sprintf("%s_%s", fileID, file.Filename)
+        filePath := filepath.Join("uploads", "pdfs", fileName)
+        
+        // Create upload directory
+        uploadDir := filepath.Dir(filePath)
+        if err := os.MkdirAll(uploadDir, 0755); err != nil {
+            c.JSON(http.StatusInternalServerError, gin.H{
+                "error": "Failed to create upload directory",
+            })
+            return
+        }
+        
         // Save file
         if err := c.SaveUploadedFile(file, filePath); err != nil {
-            log.Printf("❌ Failed to save file %s: %v", file.Filename, err)
-            continue
+            c.JSON(http.StatusInternalServerError, gin.H{
+                "error": fmt.Sprintf("Failed to save file %s", file.Filename),
+            })
+            return
         }
-
-        log.Printf("✅ File saved: %s", filePath)
-
+        
+        // ✅ Extract PDF content for OpenAI processing
+        pdfContent, err := extractPDFContent(filePath)
+        if err != nil {
+            log.Printf("⚠️ Failed to extract content from %s: %v", file.Filename, err)
+            pdfContent = fmt.Sprintf("Content from %s could not be extracted", file.Filename)
+        }
+        
+        // ✅ Process content with OpenAI for embeddings
+        embeddings, err := generateOpenAIEmbeddings(pdfContent)
+        if err != nil {
+            log.Printf("⚠️ Failed to generate embeddings for %s: %v", file.Filename, err)
+        }
+        
+        // Create PDF file record
         pdfFile := models.PDFFile{
-            ID:         fileID,
-            FileName:   file.Filename,
-            FilePath:   filePath,
-            FileSize:   file.Size,
-            UploadedAt: time.Now(),
-            Status:     "processing",
+            ID:           fileID,
+            FileName:     file.Filename,
+            FilePath:     filePath,
+            FileSize:     file.Size,
+            ContentType:  file.Header.Get("Content-Type"),
+            Content:      pdfContent,
+            Embeddings:   embeddings,
+            UploadedAt:   time.Now(),
+            ProcessedAt:  time.Now(),
+            Status:       "processed",
         }
-
-        // Process with Gemini if enabled
-        var content string
-        if project.GeminiEnabled && project.GeminiAPIKey != "" {
-            log.Printf("🤖 Processing PDF with Gemini: %s", file.Filename)
-            content, err = processPDFWithGemini(filePath, project.GeminiAPIKey)
-            if err == nil {
-                pdfFile.ProcessedAt = time.Now()
-                pdfFile.Status = "completed"
-                log.Printf("✅ Gemini processing completed for: %s", file.Filename)
-            } else {
-                log.Printf("❌ Gemini processing failed for %s: %v", file.Filename, err)
-                pdfFile.Status = "failed"
-                content = "Failed to process PDF content"
-            }
-        } else {
-            content = "PDF uploaded successfully (Gemini processing disabled)"
-            pdfFile.Status = "completed"
-        }
-
-        uploadedFiles = append(uploadedFiles, pdfFile)
-        allContent.WriteString(content + "\n\n")
+        
+        pdfFiles = append(pdfFiles, pdfFile)
+        combinedPDFContent += pdfContent + "\n\n"
     }
 
-    if len(uploadedFiles) == 0 {
-        log.Printf("❌ No files were successfully processed")
-        c.JSON(http.StatusBadRequest, gin.H{"error": "No files could be processed"})
+    // Generate unique project ID
+    projectID := fmt.Sprintf("proj_%d_%s", time.Now().Unix(), generateRandomString(8))
+    embedCode := generateEmbedCode(projectID)
+
+    // Create project object
+    project := models.Project{
+        ID:                primitive.NewObjectID(),
+        ProjectID:         projectID,
+        Name:              name,
+        Description:       description,
+        Category:          "chatbot",
+        ClientID:          clientEmail,
+        StartDate:         time.Now(),
+        ExpiryDate:        time.Now().AddDate(1, 0, 0),
+        Status:            "active",
+        TotalTokensUsed:   0,
+        MonthlyTokenLimit: monthlyTokenLimit,
+        EmbedCode:         embedCode,
+        WidgetSettings: models.ProjectWidgetConfig{
+            Theme:            theme,
+            PrimaryColor:     primaryColor,
+            WelcomeMessage:   welcomeMessage,
+            Position:         "bottom-right",
+            ShowBranding:     true,
+            EnableFileUpload: len(pdfFiles) > 0,
+            EnableRating:     true,
+        },
+        AIProvider:        "openai",
+        OpenAIModel:       "gpt-4o",
+        PDFFiles:          pdfFiles,
+        PDFContent:        combinedPDFContent,
+        CreatedAt:         time.Now(),
+        UpdatedAt:         time.Now(),
+        IsActive:          true,
+    }
+
+    // Insert project into database
+    collection := config.GetProjectsCollection()
+    result, err := collection.InsertOne(context.Background(), project)
+    if err != nil {
+        log.Printf("❌ Failed to create project: %v", err)
+        c.JSON(http.StatusInternalServerError, gin.H{
+            "error": "Failed to create project",
+        })
         return
     }
 
-    // Update project with PDF files and content
+    project.ID = result.InsertedID.(primitive.ObjectID)
+
+    log.Printf("✅ Project created with %d PDF files: %s by %s", len(pdfFiles), project.Name, userEmail)
+
+    c.JSON(http.StatusCreated, gin.H{
+        "message": "Project created successfully",
+        "project": gin.H{
+            "id":                  project.ID.Hex(),
+            "project_id":          project.ProjectID,
+            "name":                project.Name,
+            "description":         project.Description,
+            "status":              project.Status,
+            "total_tokens_used":   project.TotalTokensUsed,
+            "monthly_token_limit": project.MonthlyTokenLimit,
+            "pdf_files_count":     len(pdfFiles),
+            "created_at":          project.CreatedAt,
+            "expiry_date":         project.ExpiryDate,
+        },
+    })
+}
+
+
+// UpdateProject - Update project settings
+func UpdateProject(c *gin.Context) {
+	projectID := c.Param("id")
+
+	var updateData struct {
+		Name              string `json:"name"`
+		Description       string `json:"description"`
+		MonthlyTokenLimit int64  `json:"monthly_token_limit"`
+		WelcomeMessage    string `json:"welcome_message"`
+		Theme             string `json:"theme"`
+		PrimaryColor      string `json:"primary_color"`
+		Status            string `json:"status"`
+	}
+
+	if err := c.ShouldBindJSON(&updateData); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid update data"})
+		return
+	}
+
+	collection := config.DB.Collection("projects")
+
+	update := bson.M{
+		"$set": bson.M{
+			"updated_at": time.Now(),
+		},
+	}
+
+	// Update fields if provided
+	if updateData.Name != "" {
+		update["$set"].(bson.M)["name"] = updateData.Name
+	}
+	if updateData.Description != "" {
+		update["$set"].(bson.M)["description"] = updateData.Description
+	}
+	if updateData.MonthlyTokenLimit > 0 {
+		update["$set"].(bson.M)["monthly_token_limit"] = updateData.MonthlyTokenLimit
+	}
+	if updateData.WelcomeMessage != "" {
+		update["$set"].(bson.M)["widget_settings.welcome_message"] = updateData.WelcomeMessage
+	}
+	if updateData.Theme != "" {
+		update["$set"].(bson.M)["widget_settings.theme"] = updateData.Theme
+	}
+	if updateData.PrimaryColor != "" {
+		update["$set"].(bson.M)["widget_settings.primary_color"] = updateData.PrimaryColor
+	}
+	if updateData.Status != "" && isValidStatus(updateData.Status) {
+		update["$set"].(bson.M)["status"] = updateData.Status
+	}
+
+	result, err := collection.UpdateOne(context.Background(),
+		bson.M{"project_id": projectID}, update)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update project"})
+		return
+	}
+
+	if result.ModifiedCount == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Project updated successfully",
+	})
+}
+
+// SuspendProject - Suspend project access
+func SuspendProject(c *gin.Context) {
+	projectID := c.Param("id")
+
+	err := updateProjectStatus(projectID, "suspended")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to suspend project"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Project suspended successfully",
+		"status":  "suspended",
+	})
+}
+
+// ReactivateProject - Reactivate suspended project
+func ReactivateProject(c *gin.Context) {
+	projectID := c.Param("id")
+
+	// Check if project is not expired
+	project, err := getProjectByID(projectID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
+		return
+	}
+
+	if time.Now().After(project.ExpiryDate) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Cannot reactivate expired project. Please renew first.",
+		})
+		return
+	}
+
+	err = updateProjectStatus(projectID, "active")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reactivate project"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Project reactivated successfully",
+		"status":  "active",
+	})
+}
+
+// GetEmbedCode - Get embeddable widget code
+func GetEmbedCode(c *gin.Context) {
+	projectID := c.Param("id")
+
+	project, err := getProjectByID(projectID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"project_id":      projectID,
+		"embed_code":      project.EmbedCode,
+		"widget_settings": project.WidgetSettings,
+	})
+}
+
+// RegenerateEmbedCode - Generate new embed code
+func RegenerateEmbedCode(c *gin.Context) {
+	projectID := c.Param("id")
+
+	newEmbedCode := generateEmbedCode(projectID)
+
+	collection := config.DB.Collection("projects")
+	update := bson.M{
+		"$set": bson.M{
+			"embed_code": newEmbedCode,
+			"updated_at": time.Now(),
+		},
+	}
+
+	result, err := collection.UpdateOne(context.Background(),
+		bson.M{"project_id": projectID}, update)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to regenerate embed code"})
+		return
+	}
+
+	if result.ModifiedCount == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":    "Embed code regenerated successfully",
+		"embed_code": newEmbedCode,
+	})
+}
+
+// DeleteProject - Soft delete project
+
+// Helper Functions
+
+// generateUniqueProjectID - Generate unique project identifier
+func generateUniqueProjectID() string {
+	timestamp := time.Now().Unix()
+	randomPart := generateRandomString(8)
+	return fmt.Sprintf("proj_%d_%s", timestamp, randomPart)
+}
+
+// generateRandomString - Generate random string for IDs
+func generateRandomString(length int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
+	result := make([]byte, length)
+
+	for i := range result {
+		num, _ := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		result[i] = charset[num.Int64()]
+	}
+
+	return string(result)
+}
+
+// generateEmbedCode - Generate embeddable widget code
+func generateEmbedCode(projectID string) string {
+	baseURL := os.Getenv("BASE_URL")
+	if baseURL == "" {
+		baseURL = "https://your-domain.com"
+	}
+
+	return fmt.Sprintf(`<script>
+(function() {
+    var script = document.createElement('script');
+    script.src = '%s/widget.js';
+    script.setAttribute('data-project-id', '%s');
+    script.async = true;
+    document.head.appendChild(script);
+})();
+</script>`, baseURL, projectID)
+}
+
+// createClientRecord - Create client record
+func createClientRecord(email, name, company, projectID string) string {
+	clientID := fmt.Sprintf("client_%d_%s", time.Now().Unix(), generateRandomString(6))
+
+	client := models.Client{
+		ID:        primitive.NewObjectID(),
+		ClientID:  clientID,
+		Email:     email,
+		Name:      name,
+		Company:   company,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	collection := config.DB.Collection("clients")
+	_, err := collection.InsertOne(context.Background(), client)
+	if err != nil {
+		log.Printf("Failed to create client record: %v", err)
+		return ""
+	}
+
+	log.Printf("✅ Client created: %s (%s)", name, email)
+	return clientID
+}
+
+// getStringOrDefault - Helper to get string value or default
+func getStringOrDefault(value, defaultValue string) string {
+	if value == "" {
+		return defaultValue
+	}
+	return value
+}
+
+// DeleteProject - Soft delete project
+func DeleteProject(c *gin.Context) {
+    projectID := c.Param("id")
+    
+    if projectID == "" {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "Project ID is required"})
+        return
+    }
+
+    collection := config.GetProjectsCollection()
+    
+    // Perform soft delete by updating status and is_active fields
     update := bson.M{
-        "$push": bson.M{"pdf_files": bson.M{"$each": uploadedFiles}},
         "$set": bson.M{
-            "pdf_content": allContent.String(),
-            "updated_at":  time.Now(),
+            "status":     "deleted",
+            "is_active":  false,
+            "updated_at": time.Now(),
         },
     }
 
-    _, err = collection.UpdateOne(context.Background(), bson.M{"_id": objID}, update)
+    result, err := collection.UpdateOne(context.Background(), 
+        bson.M{"project_id": projectID}, update)
     if err != nil {
-        log.Printf("❌ Failed to update project: %v", err)
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update project"})
+        log.Printf("❌ Failed to delete project %s: %v", projectID, err)
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete project"})
         return
     }
 
-    processingTime := time.Since(startTime)
-    log.Printf("✅ Successfully processed %d files for project %s in %v", len(uploadedFiles), project.Name, processingTime)
-
-    // ✅ ENHANCED: More detailed response
-    c.JSON(http.StatusOK, gin.H{
-        "message":          "PDFs uploaded and processed successfully",
-        "files_uploaded":   len(uploadedFiles),
-        "total_files":      len(files),
-        "skipped_files":    len(files) - len(uploadedFiles),
-        "files":           uploadedFiles,
-        "processing_time":  processingTime.Milliseconds(),
-    })
-}
-
-
-
-// processPDFWithGemini - Enhanced PDF processing with Gemini AI
-func processPDFWithGemini(filePath, apiKey string) (string, error) {
-    ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-    defer cancel()
-    
-    // Create client with project-specific API key
-    client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
-    if err != nil {
-        return "", fmt.Errorf("failed to create Gemini client: %v", err)
-    }
-    defer client.Close()
-    
-    // Upload file to Gemini
-    file, err := client.UploadFileFromPath(ctx, filePath, nil)
-    if err != nil {
-        return "", fmt.Errorf("failed to upload file to Gemini: %v", err)
-    }
-    
-    // Wait for file to be processed with timeout
-    maxWaitTime := 30 * time.Second
-    startTime := time.Now()
-    
-    for file.State == genai.FileStateProcessing {
-        if time.Since(startTime) > maxWaitTime {
-            return "", fmt.Errorf("file processing timeout")
-        }
-        
-        time.Sleep(2 * time.Second)
-        file, err = client.GetFile(ctx, file.Name)
-        if err != nil {
-            return "", fmt.Errorf("failed to check file status: %v", err)
-        }
-    }
-    
-    if file.State != genai.FileStateActive {
-        return "", fmt.Errorf("file processing failed with state: %v", file.State)
-    }
-    
-    // Process the PDF with enhanced prompt
-    model := client.GenerativeModel("gemini-1.5-flash")
-    resp, err := model.GenerateContent(ctx, 
-        genai.FileData{URI: file.URI, MIMEType: file.MIMEType},
-        genai.Text(`Extract and organize all information from this document in a structured format. 
-        Include:
-        1. Main topics and sections with clear headings
-        2. Key points and important details
-        3. Any procedures, steps, or instructions
-        4. Important facts, figures, and data
-        5. Contact information if present
-        6. Definitions and terminology
-        7. Tables and lists if any
-        
-        Format the content clearly with headings and bullet points where appropriate. 
-        This will be used as a knowledge base for answering user questions.
-        Make sure to preserve the logical structure and hierarchy of information.
-        ➡️ Limit your answer to 2–3 concise, informative sentences unless more is absolutely required.
-        `),
-    )
-    
-    if err != nil {
-        return "", fmt.Errorf("failed to generate content: %v", err)
-    }
-    
-    if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {
-        return string(resp.Candidates[0].Content.Parts[0].(genai.Text)), nil
-    }
-    
-    return "", fmt.Errorf("no content generated from PDF")
-}
-
-// DeletePDF - Delete specific PDF file
-func DeletePDF(c *gin.Context) {
-    projectID := c.Param("id")
-    fileID := c.Param("fileId")
-    
-    objID, err := primitive.ObjectIDFromHex(projectID)
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
-        return
-    }
-
-    collection := config.DB.Collection("projects")
-    
-    // Get project to find file path for deletion
-    var project models.Project
-    err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
-    if err != nil {
-        c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
-        return
-    }
-    
-    // Find and delete physical file
-    var fileToDelete models.PDFFile
-    for _, file := range project.PDFFiles {
-        if file.ID == fileID {
-            fileToDelete = file
-            break
-        }
-    }
-    
-    if fileToDelete.FilePath != "" {
-        os.Remove(fileToDelete.FilePath)
-    }
-    
-    // Remove file from array
-    update := bson.M{
-        "$pull": bson.M{"pdf_files": bson.M{"id": fileID}},
-        "$set":  bson.M{"updated_at": time.Now()},
-    }
-
-    _, err = collection.UpdateOne(context.Background(), bson.M{"_id": objID}, update)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete PDF"})
-        return
-    }
-
-    c.JSON(http.StatusOK, gin.H{
-        "message": "PDF deleted successfully",
-        "file_id": fileID,
-    })
-}
-
-// GetPDFFiles - Get all PDF files for a project
-func GetPDFFiles(c *gin.Context) {
-    projectID := c.Param("id")
-    objID, err := primitive.ObjectIDFromHex(projectID)
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
-        return
-    }
-
-    collection := config.DB.Collection("projects")
-    var project models.Project
-    err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
-    if err != nil {
+    if result.ModifiedCount == 0 {
         c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
         return
     }
 
+    // Log deletion action
+    config.LogNotification(primitive.NilObjectID, "deletion", 
+        fmt.Sprintf("Project %s was deleted", projectID))
+
+    log.Printf("⚠️ Project soft deleted: %s", projectID)
+
     c.JSON(http.StatusOK, gin.H{
+        "message": "Project deleted successfully",
         "project_id": projectID,
-        "pdf_files":  project.PDFFiles,
-        "total_files": len(project.PDFFiles),
     })
 }
 
-// ===== ANALYTICS =====
-
-// ===== PROJECT DASHBOARD FUNCTIONS =====
-
-// ProjectDashboard - Display project dashboard page
-func ProjectDashboard(c *gin.Context) {
-    projectID := c.Param("id")
-    objID, err := primitive.ObjectIDFromHex(projectID)
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
-        return
-    }
-    
-    // Get project details
-    collection := config.DB.Collection("projects")
-    var project models.Project
-    err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
-    if err != nil {
-        c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
-        return
-    }
-    
-    // Get additional statistics
-    chatCollection := config.DB.Collection("chat_messages")
-    messageCount, _ := chatCollection.CountDocuments(context.Background(), bson.M{"project_id": objID})
-    
-    c.HTML(http.StatusOK, "project/dashboard.html", gin.H{
-        "title":         "Project Dashboard - " + project.Name,
-        "project":       project,
-        "message_count": messageCount,
-        "embed_url":     fmt.Sprintf("/embed/%s", projectID),
-    })
-}
-
-// GetProjectInfo - Get project information for API calls
-func GetProjectInfo(c *gin.Context) {
-    projectID := c.Param("projectId")
-    objID, err := primitive.ObjectIDFromHex(projectID)
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
-        return
-    }
-
-    collection := config.DB.Collection("projects")
-    var project models.Project
-    err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
-    if err != nil {
-        c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
-        return
-    }
-
-    // Get additional stats
-    chatCollection := config.DB.Collection("chat_messages")
-    messageCount, _ := chatCollection.CountDocuments(context.Background(), bson.M{"project_id": objID})
-    
-    // Get unique sessions count
-    pipeline := []bson.M{
-        {"$match": bson.M{"project_id": objID}},
-        {"$group": bson.M{"_id": "$session_id"}},
-        {"$count": "unique_sessions"},
-    }
-    
-    cursor, _ := chatCollection.Aggregate(context.Background(), pipeline)
-    var result []bson.M
-    cursor.All(context.Background(), &result)
-    
-    uniqueSessions := int64(0)
-    if len(result) > 0 {
-        if count, ok := result[0]["unique_sessions"].(int32); ok {
-            uniqueSessions = int64(count)
-        }
-    }
-
-    c.JSON(http.StatusOK, gin.H{
-        "project_id":      projectID,
-        "project":         project,
-        "message_count":   messageCount,
-        "unique_sessions": uniqueSessions,
-        "embed_url":       fmt.Sprintf("/embed/%s", projectID),
-    })
-}
-
-// ===== USER PROJECT FUNCTIONS =====
-
-// UserProjects - Get projects for regular users
-func UserProjects(c *gin.Context) {
-    // Get user projects (implement based on your auth system)
-    collection := config.DB.Collection("projects")
-    
-    // For now, return all active projects
-    // In production, filter by user permissions
-    cursor, err := collection.Find(context.Background(), bson.M{"is_active": true})
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch projects"})
-        return
-    }
-
-    var projects []models.Project
-    if err := cursor.All(context.Background(), &projects); err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse projects"})
-        return
-    }
-
-    c.JSON(http.StatusOK, gin.H{
-        "projects": projects,
-        "count":    len(projects),
-    })
-}
-
-// ===== HELPER FUNCTIONS =====
-
-// getGeminiModel - Get Gemini model with fallback
-func getGeminiModel(model string) string {
-    if model == "" {
-        return "gemini-1.5-flash"
-    }
-    
-    // Validate model name
-    validModels := []string{"gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"}
-    for _, validModel := range validModels {
-        if model == validModel {
-            return model
-        }
-    }
-    
-    return "gemini-1.5-flash" // fallback
-}
-
-// getWelcomeMessage - Get welcome message with fallback
-func getWelcomeMessage(message string) string {
-    if message == "" {
-        return "Hello! How can I help you today?"
-    }
-    return message
-}
-
-// validateFileType - Validate uploaded file type
-func validateFileType(filename string) bool {
-    allowedExtensions := []string{".pdf", ".doc", ".docx", ".txt"}
-    ext := strings.ToLower(filepath.Ext(filename))
-    
-    for _, allowed := range allowedExtensions {
-        if ext == allowed {
-            return true
-        }
-    }
-    return false
-}
-
-// formatFileSize - Format file size for display
-func formatFileSize(bytes int64) string {
-    const unit = 1024
-    if bytes < unit {
-        return fmt.Sprintf("%d B", bytes)
-    }
-    div, exp := int64(unit), 0
-    for n := bytes / unit; n >= unit; n /= unit {
-        div *= unit
-        exp++
-    }
-    return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
-}
-
-// Add this to your handlers/pdf.go or similar file
-func ProcessPDFForAI(pdfContent string) string {
-    // Clean and structure the PDF content for better AI understanding
-    lines := strings.Split(pdfContent, "\n")
-    var processedLines []string
-    
-    for _, line := range lines {
-        // Remove excessive whitespace
-        cleaned := strings.TrimSpace(line)
-        if cleaned != "" {
-            processedLines = append(processedLines, cleaned)
-        }
-    }
-    
-    // Join with proper spacing
-    structured := strings.Join(processedLines, "\n")
-    
-    // Add section markers for better AI understanding
-    structured = "=== DOCUMENT CONTENT START ===\n" + structured + "\n=== DOCUMENT CONTENT END ==="
-    
-    return structured
-}
-
-// Chunk large PDF content for better processing
-func ChunkPDFContent(content string, maxChunkSize int) []string {
-    if len(content) <= maxChunkSize {
-        return []string{content}
-    }
-    
-    var chunks []string
-    words := strings.Fields(content)
-    
-    var currentChunk []string
-    currentSize := 0
-    
-    for _, word := range words {
-        wordSize := len(word) + 1 // +1 for space
-        
-        if currentSize + wordSize > maxChunkSize && len(currentChunk) > 0 {
-            chunks = append(chunks, strings.Join(currentChunk, " "))
-            currentChunk = []string{word}
-            currentSize = wordSize
-        } else {
-            currentChunk = append(currentChunk, word)
-            currentSize += wordSize
-        }
-    }
-    
-    if len(currentChunk) > 0 {
-        chunks = append(chunks, strings.Join(currentChunk, " "))
-    }
-    
-    return chunks
-}
-
-
-// Add this function to validate and enhance PDF content
-func ValidateAndEnhancePDFContent(projectID primitive.ObjectID) error {
-    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-    defer cancel()
-    
-    collection := getProjectsCollection()
-    var project models.Project
-    
-    err := collection.FindOne(ctx, bson.M{"_id": projectID}).Decode(&project)
-    if err != nil {
-        return fmt.Errorf("project not found: %v", err)
-    }
-    
-    // Check if PDF content exists and is meaningful
-    if project.PDFContent == "" {
-        log.Printf("⚠️ Project %s has no PDF content", projectID.Hex())
-        return fmt.Errorf("no PDF content available")
-    }
-    
-    // Check content length
-    contentLength := len(project.PDFContent)
-    log.Printf("📄 PDF content length for project %s: %d characters", projectID.Hex(), contentLength)
-    
-    if contentLength < 100 {
-        log.Printf("⚠️ PDF content seems too short for project %s", projectID.Hex())
-        return fmt.Errorf("PDF content appears incomplete")
-    }
-    
-    // Enhance content if needed
-    if !strings.Contains(project.PDFContent, "===") {
-        enhancedContent := ProcessPDFForAI(project.PDFContent)
-        
-        // Update the project with enhanced content
-        _, err = collection.UpdateOne(ctx, bson.M{"_id": projectID}, bson.M{
-            "$set": bson.M{
-                "pdf_content": enhancedContent,
-                "updated_at": time.Now(),
-            },
-        })
-        if err != nil {
-            log.Printf("❌ Failed to update enhanced PDF content: %v", err)
-        } else {
-            log.Printf("✅ Enhanced PDF content for project %s", projectID.Hex())
-        }
-    }
-    
-    return nil
-}

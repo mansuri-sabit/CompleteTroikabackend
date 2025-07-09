@@ -1,1149 +1,976 @@
 package handlers
 
 import (
-
-    "math/rand"
-   "go.mongodb.org/mongo-driver/mongo/options" 
-        "context"
-    "fmt"
-    "io/ioutil"
-    "net/http"
-    "strings"
-    "time"
-
-    "github.com/gin-gonic/gin"
-    "go.mongodb.org/mongo-driver/bson"
-    "go.mongodb.org/mongo-driver/bson/primitive"
-    "jevi-chat/config"
-    "jevi-chat/models"
+	"context"
+	"fmt"
+	"strings"
+	"net/http"
+	"strconv"
+	"time"
+	"os"
+	"github.com/gin-gonic/gin"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo/options"
+	"log"
+	"github.com/ledongthuc/pdf"
+	"jevi-chat/config"
+	"jevi-chat/models"
+	"github.com/sashabaranov/go-openai"
 )
 
-// In handlers/admin.go
+// AdminDashboard - Enhanced admin dashboard with comprehensive statistics
+// AdminDashboard - Get dashboard statistics with project counts
 func AdminDashboard(c *gin.Context) {
-    stats := map[string]interface{}{
-        "total_users": 0,
-        "total_projects": 0,
-        "total_messages": 0,
-        "active_users": 0,
-    }
+    userID := c.GetString("user_id")
+    userRole := c.GetString("user_role")
     
-    // Get actual stats from database
-    if userCollection := config.DB.Collection("users"); userCollection != nil {
-        userCount, _ := userCollection.CountDocuments(context.Background(), bson.M{})
-        activeUserCount, _ := userCollection.CountDocuments(context.Background(), bson.M{"is_active": true})
-        stats["total_users"] = userCount
-        stats["active_users"] = activeUserCount
-    }
-    
-    if projectCollection := config.DB.Collection("projects"); projectCollection != nil {
-        projectCount, _ := projectCollection.CountDocuments(context.Background(), bson.M{})
-        stats["total_projects"] = projectCount
-    }
-    
-    c.JSON(http.StatusOK, gin.H{
-        "message": "Admin dashboard loaded successfully",
-        "stats": stats,
-        "timestamp": time.Now(),
-    })
-}
-
-func AdminProjects(c *gin.Context) {
-    fmt.Println("AdminProjects handler called - DEBUG")
-    
-    // Make sure this matches your actual MongoDB collection name
-    collection := config.DB.Collection("projects")
-    
-    // Add debug logging to check collection existence
-    count, err := collection.CountDocuments(context.Background(), bson.M{})
-    fmt.Printf("Total documents in projects collection: %d\n", count)
-    
-    if err != nil {
-        fmt.Printf("Error counting documents: %v\n", err)
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch projects"})
-        return
-    }
-    
-    cursor, err := collection.Find(context.Background(), bson.M{})
-    if err != nil {
-        fmt.Printf("Error finding projects: %v\n", err)
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch projects"})
-        return
-    }
-    
-    var projects []models.Project
-    if err := cursor.All(context.Background(), &projects); err != nil {
-        fmt.Printf("Error decoding projects: %v\n", err)
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to decode projects"})
-        return
-    }
-    
-    fmt.Printf("Successfully fetched %d projects from database\n", len(projects))
-    
-    // Always return an array, even if empty
-    if projects == nil {
-        projects = []models.Project{}
-    }
-    
-    c.JSON(http.StatusOK, gin.H{
-        "success": true,
-        "projects": projects,
-        "count": len(projects),
-        "total_in_db": count, // Add this for debugging
-    })
-}
-
-func CreateProject(c *gin.Context) {
-    fmt.Println("CreateProject handler called")
-    
-    var project models.Project
-    
-    // Log the raw request body for debugging
-    body, _ := c.GetRawData()
-    fmt.Printf("Raw request body: %s\n", string(body))
-    
-    // Reset the body for binding
-    c.Request.Body = ioutil.NopCloser(strings.NewReader(string(body)))
-    
-    if err := c.ShouldBindJSON(&project); err != nil {
-        fmt.Printf("JSON binding error: %v\n", err)
-        c.JSON(http.StatusBadRequest, gin.H{
-            "error": "Invalid project data",
-            "details": err.Error(),
+    if userID == "" || userRole != "admin" {
+        c.JSON(http.StatusUnauthorized, gin.H{
+            "error": "Admin authentication required",
         })
         return
     }
-    
-    fmt.Printf("Parsed project: %+v\n", project)
-    
-    // Initialize all required fields based on your struct
-    project.ID = primitive.NewObjectID()
-    project.IsActive = true
-    project.CreatedAt = time.Now()
-    project.UpdatedAt = time.Now()
-    
-    // Set default values for optional fields
-    if project.WelcomeMessage == "" {
-        project.WelcomeMessage = "Hello! How can I help you today?"
-    }
-    
-    if project.Category == "" {
-        project.Category = "General"
-    }
-    
-    // Initialize Gemini settings with defaults
-    if project.GeminiModel == "" {
-        project.GeminiModel = "gemini-1.5-flash"
-    }
-    
-    if project.GeminiLimit == 0 {
-        project.GeminiLimit = 1000 // Default daily limit
-    }
-    
-    // Initialize arrays to prevent null values
-    if project.PDFFiles == nil {
-        project.PDFFiles = []models.PDFFile{}
-    }
-    
-    // Initialize analytics fields
-    project.TotalQuestions = 0
-    project.GeminiUsage = 0
-    project.LastUsed = time.Now()
-    
-    fmt.Printf("Project before insertion: %+v\n", project)
-    
-    // Insert into database
-    collection := config.DB.Collection("projects")
-    result, err := collection.InsertOne(context.Background(), project)
+
+    // Get project statistics
+    projectStats, err := getProjectStatistics()
     if err != nil {
-        fmt.Printf("Database insertion error: %v\n", err)
+        log.Printf("❌ Failed to get project statistics: %v", err)
         c.JSON(http.StatusInternalServerError, gin.H{
-            "error": "Failed to create project",
-            "details": err.Error(),
+            "error": "Failed to fetch dashboard data",
         })
         return
     }
-    
-    fmt.Printf("Insertion successful. Result: %+v\n", result)
-    
-    c.JSON(http.StatusCreated, gin.H{
-        "success": true,
-        "message": "Project created successfully",
-        "project": project,
-        "inserted_id": result.InsertedID,
-    })
-}
 
-func ProjectDetails(c *gin.Context) {
-    projectID := c.Param("id")
-    objID, err := primitive.ObjectIDFromHex(projectID)
+    // Get recent projects
+    recentProjects, err := getRecentProjects(5) // Get last 5 projects
     if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
-        return
-    }
-    
-    collection := config.DB.Collection("projects")
-    var project models.Project
-    err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
-    if err != nil {
-        c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
-        return
-    }
-    
-    c.JSON(http.StatusOK, gin.H{
-        "project": project,
-    })
-}
-
-func UpdateProject(c *gin.Context) {
-    projectID := c.Param("id")
-    objID, err := primitive.ObjectIDFromHex(projectID)
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
-        return
-    }
-    
-    var updateData bson.M
-    if err := c.ShouldBindJSON(&updateData); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid update data"})
-        return
-    }
-    
-    updateData["updated_at"] = time.Now()
-    
-    collection := config.DB.Collection("projects")
-    _, err = collection.UpdateOne(
-        context.Background(),
-        bson.M{"_id": objID},
-        bson.M{"$set": updateData},
-    )
-    
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update project"})
-        return
-    }
-    
-    c.JSON(http.StatusOK, gin.H{
-        "message": "Project updated successfully",
-        "project_id": projectID,
-    })
-}
-
-func DeleteProject(c *gin.Context) {
-    projectID := c.Param("id")
-    objID, err := primitive.ObjectIDFromHex(projectID)
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
-        return
-    }
-    
-    collection := config.DB.Collection("projects")
-    _, err = collection.DeleteOne(context.Background(), bson.M{"_id": objID})
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete project"})
-        return
-    }
-    
-    c.JSON(http.StatusOK, gin.H{
-        "message": "Project deleted successfully",
-        "project_id": projectID,
-    })
-}
-
-func AdminUsers(c *gin.Context) {
-    // Get all users from database
-    collection := config.DB.Collection("users")
-    cursor, err := collection.Find(context.Background(), bson.M{})
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch users"})
-        return
-    }
-    
-    var users []models.User
-    cursor.All(context.Background(), &users)
-    
-    // Remove password from response
-    for i := range users {
-        users[i].Password = ""
-    }
-    
-    c.JSON(http.StatusOK, gin.H{
-        "title": "Users - Admin",
-        "users": users,
-        "count": len(users),
-    })
-    
-    // Uncomment when you have the template:
-    // c.HTML(http.StatusOK, "admin/users.html", gin.H{
-    //     "title": "Users - Admin",
-    //     "users": users,
-    // })
-}
-
-func AdminAnalytics(c *gin.Context) {
-    analytics := getAnalyticsData()
-    
-    c.JSON(http.StatusOK, gin.H{
-        "title": "Analytics - Admin",
-        "analytics": analytics,
-    })
-}
-
-func GetAnalyticsData(c *gin.Context) {
-    analytics := getAnalyticsData()
-    c.JSON(http.StatusOK, gin.H{"data": analytics})
-}
-
-func AdminSettings(c *gin.Context) {
-    settings := map[string]interface{}{
-        "app_name": "Jevi Chat",
-        "version": "1.0.0",
-        "maintenance_mode": false,
-        "max_file_size": "10MB",
-        "allowed_file_types": []string{"pdf", "txt", "doc"},
-    }
-    
-    c.JSON(http.StatusOK, gin.H{
-        "title": "Settings - Admin",
-        "settings": settings,
-    })
-}
-
-func UpdateSettings(c *gin.Context) {
-    var settings map[string]interface{}
-    if err := c.ShouldBindJSON(&settings); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid settings data"})
-        return
-    }
-    
-    c.JSON(http.StatusOK, gin.H{
-        "message": "Settings updated successfully",
-        "settings": settings,
-    })
-}
-
-func GetUserDetails(c *gin.Context) {
-    userID := c.Param("id")
-    objID, err := primitive.ObjectIDFromHex(userID)
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
-        return
-    }
-    
-    collection := config.DB.Collection("users")
-    var user models.User
-    err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&user)
-    if err != nil {
-        c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
-        return
-    }
-    
-    user.Password = "" // Remove password from response
-    
-    c.JSON(http.StatusOK, gin.H{
-        "user": user,
-    })
-}
-
-func UpdateUser(c *gin.Context) {
-    userID := c.Param("id")
-    objID, err := primitive.ObjectIDFromHex(userID)
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
-        return
-    }
-    
-    var updateData bson.M
-    if err := c.ShouldBindJSON(&updateData); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid update data"})
-        return
-    }
-    
-    updateData["updated_at"] = time.Now()
-    delete(updateData, "password") // Don't allow password updates through this endpoint
-    
-    collection := config.DB.Collection("users")
-    _, err = collection.UpdateOne(
-        context.Background(),
-        bson.M{"_id": objID},
-        bson.M{"$set": updateData},
-    )
-    
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update user"})
-        return
-    }
-    
-    c.JSON(http.StatusOK, gin.H{
-        "message": "User updated successfully",
-        "user_id": userID,
-    })
-}
-
-func DeleteUser(c *gin.Context) {
-    userID := c.Param("id")
-    objID, err := primitive.ObjectIDFromHex(userID)
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
-        return
-    }
-    
-    collection := config.DB.Collection("users")
-    _, err = collection.DeleteOne(context.Background(), bson.M{"_id": objID})
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete user"})
-        return
-    }
-    
-    c.JSON(http.StatusOK, gin.H{
-        "message": "User deleted successfully",
-        "user_id": userID,
-    })
-}
-
-func ToggleUserStatus(c *gin.Context) {
-    userID := c.Param("id")
-    objID, err := primitive.ObjectIDFromHex(userID)
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
-        return
-    }
-    
-    // Get current user status
-    collection := config.DB.Collection("users")
-    var user models.User
-    err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&user)
-    if err != nil {
-        c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
-        return
-    }
-    
-    // Toggle status
-    newStatus := !user.IsActive
-    _, err = collection.UpdateOne(
-        context.Background(),
-        bson.M{"_id": objID},
-        bson.M{"$set": bson.M{"is_active": newStatus, "updated_at": time.Now()}},
-    )
-    
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to toggle user status"})
-        return
-    }
-    
-    status := "activated"
-    if !newStatus {
-        status = "deactivated"
-    }
-    
-    c.JSON(http.StatusOK, gin.H{
-        "message": "User " + status + " successfully",
-        "user_id": userID,
-        "new_status": newStatus,
-    })
-}
-
-func ToggleProjectStatus(c *gin.Context) {
-    projectID := c.Param("id")
-    objID, err := primitive.ObjectIDFromHex(projectID)
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
-        return
-    }
-    
-    // Get current project status
-    collection := config.DB.Collection("projects")
-    var project models.Project
-    err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
-    if err != nil {
-        c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
-        return
-    }
-    
-    // Toggle status
-    newStatus := !project.IsActive
-    _, err = collection.UpdateOne(
-        context.Background(),
-        bson.M{"_id": objID},
-        bson.M{"$set": bson.M{"is_active": newStatus, "updated_at": time.Now()}},
-    )
-    
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to toggle project status"})
-        return
-    }
-    
-    status := "activated"
-    if !newStatus {
-        status = "deactivated"
-    }
-    
-    c.JSON(http.StatusOK, gin.H{
-        "message": "Project " + status + " successfully",
-        "project_id": projectID,
-        "new_status": newStatus,
-    })
-}
-
-// Helper functions
-func getAdminStats() map[string]interface{} {
-    stats := map[string]interface{}{
-        "total_users": 0,
-        "total_projects": 0,
-        "total_messages": 0,
-        "active_users": 0,
-    }
-    
-    // Get user count
-    if userCollection := config.DB.Collection("users"); userCollection != nil {
-        userCount, _ := userCollection.CountDocuments(context.Background(), bson.M{})
-        activeUserCount, _ := userCollection.CountDocuments(context.Background(), bson.M{"is_active": true})
-        stats["total_users"] = userCount
-        stats["active_users"] = activeUserCount
-    }
-    
-    // Get project count
-    if projectCollection := config.DB.Collection("projects"); projectCollection != nil {
-        projectCount, _ := projectCollection.CountDocuments(context.Background(), bson.M{})
-        stats["total_projects"] = projectCount
-    }
-    
-    // Get message count
-    if messageCollection := config.DB.Collection("chat_messages"); messageCollection != nil {
-        messageCount, _ := messageCollection.CountDocuments(context.Background(), bson.M{})
-        stats["total_messages"] = messageCount
-    }
-    
-    return stats
-}
-
-func getAnalyticsData() map[string]interface{} {
-    return map[string]interface{}{
-        "daily_users": 150,
-        "daily_messages": 1200,
-        "response_time": "1.2s",
-        "satisfaction_rate": "94%",
-        "popular_features": []string{"PDF Chat", "Project Management", "User Dashboard"},
-    }
-}
-
-
-func SetGeminiLimit(c *gin.Context) {
-    projectID := c.Param("id")
-    objID, err := primitive.ObjectIDFromHex(projectID)
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
-        return
+        log.Printf("❌ Failed to get recent projects: %v", err)
+        recentProjects = []models.Project{} // Empty array as fallback
     }
 
-    var input struct {
-        Limit int `json:"limit"`
-    }
-
-    if err := c.ShouldBindJSON(&input); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
-        return
-    }
-
-    if input.Limit < 0 {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Limit must be non-negative"})
-        return
-    }
-
-    collection := config.DB.Collection("projects")
-    _, err = collection.UpdateOne(
-        context.Background(),
-        bson.M{"_id": objID},
-        bson.M{"$set": bson.M{"gemini_limit": input.Limit, "updated_at": time.Now()}},
-    )
-
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update project"})
-        return
-    }
+    // Calculate additional metrics
+    totalRevenue := calculateTotalRevenue()
+    apiCallsToday := calculateAPICallsToday()
+    tokensUsedToday := calculateTokensUsedToday()
 
     c.JSON(http.StatusOK, gin.H{
-        "message": "Gemini usage limit updated",
-        "limit":   input.Limit,
-    })
-}
-
-func ResetGeminiUsage(c *gin.Context) {
-    projectID := c.Param("id")
-    objID, err := primitive.ObjectIDFromHex(projectID)
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
-        return
-    }
-
-    collection := config.DB.Collection("projects")
-    _, err = collection.UpdateOne(
-        context.Background(),
-        bson.M{"_id": objID},
-        bson.M{"$set": bson.M{"gemini_usage": 0, "updated_at": time.Now()}},
-    )
-
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset usage"})
-        return
-    }
-
-    c.JSON(http.StatusOK, gin.H{"message": "Gemini usage counter reset"})
-}
-
-
-
-// GetNotifications handles GET /api/admin/notifications
-func GetNotifications(c *gin.Context) {
-    // Sample notifications - replace with your database logic
-    notifications := []map[string]interface{}{
-        {
-            "id":         1,
-            "type":       "success",
-            "message":    "System backup completed successfully",
-            "time":       "2 min ago",
-            "created_at": time.Now().Add(-2 * time.Minute),
+        "stats": gin.H{
+            "totalProjects":    projectStats.TotalProjects,
+            "activeProjects":   projectStats.ActiveProjects,
+            "suspendedProjects": projectStats.SuspendedProjects,
+            "expiredProjects":  projectStats.ExpiredProjects,
+            "monthlyRevenue":   totalRevenue,
+            "apiCalls":         apiCallsToday,
+            "tokensUsed":       tokensUsedToday,
         },
-        {
-            "id":         2,
-            "type":       "info",
-            "message":    "New user registered",
-            "time":       "5 min ago",
-            "created_at": time.Now().Add(-5 * time.Minute),
-        },
-        {
-            "id":         3,
-            "type":       "warning",
-            "message":    "High API usage detected",
-            "time":       "1 hour ago",
-            "created_at": time.Now().Add(-1 * time.Hour),
-        },
-        {
-            "id":         4,
-            "type":       "success",
-            "message":    "New project created successfully",
-            "time":       "3 hours ago",
-            "created_at": time.Now().Add(-3 * time.Hour),
-        },
-    }
-
-    c.JSON(http.StatusOK, gin.H{
-        "success":       true,
-        "notifications": notifications,
+        "projects": recentProjects,
+        "message": "Dashboard data fetched successfully",
     })
 }
 
-// GetRealtimeStats handles GET /api/admin/realtime-stats
-func GetRealtimeStats(c *gin.Context) {
-    // Generate real-time statistics
-    stats := map[string]interface{}{
-        "activeUsers":       getCurrentActiveUsers(),
-        "messagesPerMinute": getMessagesPerMinute(),
-        "serverLoad":        getServerLoad(),
-        "apiCalls":          getAPICallsCount(),
-        "timestamp":         time.Now(),
-    }
-
-    c.JSON(http.StatusOK, stats)
+// ProjectStatistics - Structure for project statistics
+type ProjectStatistics struct {
+    TotalProjects     int64 `json:"total_projects"`
+    ActiveProjects    int64 `json:"active_projects"`
+    SuspendedProjects int64 `json:"suspended_projects"`
+    ExpiredProjects   int64 `json:"expired_projects"`
 }
 
-// Helper functions for real-time stats
-func getCurrentActiveUsers() int {
-    // Query your database for active users
-    collection := config.GetCollection("users")
-    count, err := collection.CountDocuments(context.TODO(), bson.M{
+// getProjectStatistics - Get comprehensive project statistics
+func getProjectStatistics() (*ProjectStatistics, error) {
+    collection := config.GetProjectsCollection()
+    ctx := context.Background()
+
+    // Count total projects (excluding deleted)
+    totalProjects, err := collection.CountDocuments(ctx, bson.M{
+        "status": bson.M{"$ne": "deleted"},
+    })
+    if err != nil {
+        return nil, err
+    }
+
+    // Count active projects
+    activeProjects, err := collection.CountDocuments(ctx, bson.M{
+        "status": "active",
         "is_active": true,
-        "last_active": bson.M{"$gte": time.Now().Add(-5 * time.Minute)},
     })
-    
     if err != nil {
-        // Return sample data if database query fails
-        return rand.Intn(50) + 25
+        return nil, err
     }
-    
-    return int(count)
-}
 
-func getMessagesPerMinute() int {
-    // Calculate messages per minute from your chat system
-    collection := config.GetCollection("messages")
-    count, err := collection.CountDocuments(context.TODO(), bson.M{
-        "created_at": bson.M{"$gte": time.Now().Add(-1 * time.Minute)},
+    // Count suspended projects
+    suspendedProjects, err := collection.CountDocuments(ctx, bson.M{
+        "status": "suspended",
     })
-    
     if err != nil {
-        return rand.Intn(30) + 5
+        return nil, err
     }
-    
-    return int(count)
+
+    // Count expired projects
+    expiredProjects, err := collection.CountDocuments(ctx, bson.M{
+        "expiry_date": bson.M{"$lt": time.Now()},
+        "status": bson.M{"$ne": "deleted"},
+    })
+    if err != nil {
+        return nil, err
+    }
+
+    return &ProjectStatistics{
+        TotalProjects:     totalProjects,
+        ActiveProjects:    activeProjects,
+        SuspendedProjects: suspendedProjects,
+        ExpiredProjects:   expiredProjects,
+    }, nil
 }
 
-func getServerLoad() int {
-    // Get server load percentage (0-100)
-    // You can implement actual system monitoring here
-    return rand.Intn(100)
+// getRecentProjects - Get recent projects for dashboard display
+func getRecentProjects(limit int) ([]models.Project, error) {
+    collection := config.GetProjectsCollection()
+    ctx := context.Background()
+
+    // Find recent projects, sorted by creation date
+    cursor, err := collection.Find(ctx, bson.M{
+        "status": bson.M{"$ne": "deleted"},
+    }, &options.FindOptions{
+        Sort:  bson.M{"created_at": -1},
+        Limit: &[]int64{int64(limit)}[0],
+    })
+    if err != nil {
+        return nil, err
+    }
+    defer cursor.Close(ctx)
+
+    var projects []models.Project
+    if err := cursor.All(ctx, &projects); err != nil {
+        return nil, err
+    }
+
+    return projects, nil
 }
 
-func getAPICallsCount() int {
-    // Count API calls - you might want to implement request logging
-    return rand.Intn(1000) + 200
+// calculateTotalRevenue - Calculate total monthly revenue
+func calculateTotalRevenue() float64 {
+    // This is a placeholder - implement based on your pricing model
+    // You might calculate based on active subscriptions, token usage, etc.
+    collection := config.GetProjectsCollection()
+    ctx := context.Background()
+
+    // Example: Count active projects and multiply by subscription price
+    activeCount, err := collection.CountDocuments(ctx, bson.M{
+        "status": "active",
+        "is_active": true,
+    })
+    if err != nil {
+        return 0
+    }
+
+    // Assuming ₹500 per project per month
+    return float64(activeCount) * 500
 }
 
-// Enhanced ToggleGeminiStatus with usage validation
-func ToggleGeminiStatus(c *gin.Context) {
-    projectID := c.Param("id")
-    objID, err := primitive.ObjectIDFromHex(projectID)
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
-        return
-    }
+// calculateAPICallsToday - Calculate API calls for today
+func calculateAPICallsToday() int64 {
+    collection := config.GetCollection("chat_messages")
+    ctx := context.Background()
 
-    var input struct {
-        Enabled bool `json:"enabled"`
-    }
+    // Get today's date range
+    today := time.Now()
+    startOfDay := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, today.Location())
+    endOfDay := startOfDay.Add(24 * time.Hour)
 
-    if err := c.ShouldBindJSON(&input); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
-        return
-    }
-
-    collection := config.DB.Collection("projects")
-    
-    // Get current project
-    var project models.Project
-    err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
-    if err != nil {
-        c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
-        return
-    }
-
-    // Validate API key if enabling
-    if input.Enabled && project.GeminiAPIKey == "" {
-        c.JSON(http.StatusBadRequest, gin.H{
-            "error": "Cannot enable Gemini: No API key configured",
-            "action_required": "Please configure Gemini API key first",
-        })
-        return
-    }
-
-    // Update project status
-    update := bson.M{
-        "$set": bson.M{
-            "gemini_enabled": input.Enabled,
-            "updated_at":     time.Now(),
-        },
-    }
-
-    _, err = collection.UpdateOne(context.Background(), bson.M{"_id": objID}, update)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update project"})
-        return
-    }
-
-    status := "disabled"
-    if input.Enabled {
-        status = "enabled"
-    }
-
-    c.JSON(http.StatusOK, gin.H{
-        "success": true,
-        "message": fmt.Sprintf("Gemini AI %s for project", status),
-        "enabled": input.Enabled,
-        "current_usage": gin.H{
-            "daily": project.GeminiUsageToday,
-            "monthly": project.GeminiUsageMonth,
-            "daily_limit": project.GeminiDailyLimit,
-            "monthly_limit": project.GeminiMonthlyLimit,
+    count, err := collection.CountDocuments(ctx, bson.M{
+        "created_at": bson.M{
+            "$gte": startOfDay,
+            "$lt":  endOfDay,
         },
     })
+    if err != nil {
+        return 0
+    }
+
+    return count
 }
 
-// Enhanced GetGeminiAnalytics with detailed tracking
-func GetGeminiAnalytics(c *gin.Context) {
-    projectID := c.Param("id")
-    objID, err := primitive.ObjectIDFromHex(projectID)
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
-        return
-    }
+// calculateTokensUsedToday - Calculate tokens used today
+func calculateTokensUsedToday() int64 {
+    collection := config.GetCollection("chat_messages")
+    ctx := context.Background()
 
-    // Get project details
-    collection := config.DB.Collection("projects")
-    var project models.Project
-    err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
-    if err != nil {
-        c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
-        return
-    }
+    // Get today's date range
+    today := time.Now()
+    startOfDay := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, today.Location())
+    endOfDay := startOfDay.Add(24 * time.Hour)
 
-    // Get usage logs for analytics
-    logsCollection := config.DB.Collection("gemini_usage_logs")
-    
-    // Get today's successful requests
-    today := time.Now().Truncate(24 * time.Hour)
-    todayCount, _ := logsCollection.CountDocuments(context.Background(), bson.M{
-        "project_id": objID,
-        "timestamp": bson.M{"$gte": today},
-        "success": true,
-    })
-
-    // Get this month's successful requests
-    thisMonth := time.Date(time.Now().Year(), time.Now().Month(), 1, 0, 0, 0, 0, time.UTC)
-    monthCount, _ := logsCollection.CountDocuments(context.Background(), bson.M{
-        "project_id": objID,
-        "timestamp": bson.M{"$gte": thisMonth},
-        "success": true,
-    })
-
-    analytics := gin.H{
-        "project": gin.H{
-            "id":              project.ID,
-            "name":            project.Name,
-            "gemini_enabled":  project.GeminiEnabled,
-            "model":           project.GeminiModel,
-        },
-        "usage": gin.H{
-            "today": gin.H{
-                "count": todayCount,
-                "limit": project.GeminiDailyLimit,
-                "remaining": project.GeminiDailyLimit - int(todayCount),
-                "cost": project.EstimatedCostToday,
+    // Aggregate tokens used today
+    pipeline := []bson.M{
+        {
+            "$match": bson.M{
+                "created_at": bson.M{
+                    "$gte": startOfDay,
+                    "$lt":  endOfDay,
+                },
             },
-            "month": gin.H{
-                "count": monthCount,
-                "limit": project.GeminiMonthlyLimit,
-                "remaining": project.GeminiMonthlyLimit - int(monthCount),
-                "cost": project.EstimatedCostMonth,
+        },
+        {
+            "$group": bson.M{
+                "_id": nil,
+                "total_tokens": bson.M{"$sum": "$tokens_used"},
             },
-            "total_questions": project.TotalQuestions,
-            "last_used": project.LastUsed,
         },
     }
 
-    c.JSON(http.StatusOK, gin.H{
-        "success": true,
-        "analytics": analytics,
-    })
-}
-
-func trackGeminiUsage(projectID primitive.ObjectID, question, response, model string, 
-                     inputTokens, outputTokens int, responseTime int64, userIP string, success bool) {
-
-    // Use accurate token-based cost
-    estimatedCost := calculateGeminiCost(model, inputTokens, outputTokens)
-
-    // Save usage log
-    usageLog := models.GeminiUsageLog{
-        ProjectID:     projectID,
-        Question:      question,
-        Response:      response,
-        Model:         model,
-        InputTokens:   inputTokens,
-        OutputTokens:  outputTokens,
-        EstimatedCost: estimatedCost,
-        ResponseTime:  responseTime,
-        UserIP:        userIP,
-        Timestamp:     time.Now(),
-        Success:       success,
-    }
-
-    logCollection := config.DB.Collection("gemini_usage_logs")
-    logCollection.InsertOne(context.Background(), usageLog)
-
-    // Update project counters if successful
-    if success {
-        projectCollection := config.DB.Collection("projects")
-        update := bson.M{
-            "$inc": bson.M{
-                "gemini_usage_today":     1,
-                "gemini_usage_month":     1,
-                "total_questions":        1,
-                "estimated_cost_today":   estimatedCost,
-                "estimated_cost_month":   estimatedCost,
-            },
-            "$set": bson.M{
-                "last_used":  time.Now(),
-                "updated_at": time.Now(),
-            },
-        }
-        projectCollection.UpdateOne(context.Background(), bson.M{"_id": projectID}, update)
-    }
-}
-
-
-// GetSubscriptionStats - Get subscription statistics for admin dashboard
-func GetSubscriptionStats(c *gin.Context) {
-    stats, err := config.GetSubscriptionStats()
+    cursor, err := collection.Aggregate(ctx, pipeline)
     if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get subscription stats"})
-        return
+        return 0
     }
-    
-    c.JSON(http.StatusOK, stats)
+    defer cursor.Close(ctx)
+
+    var result []bson.M
+    if err := cursor.All(ctx, &result); err != nil || len(result) == 0 {
+        return 0
+    }
+
+    if totalTokens, ok := result[0]["total_tokens"].(int64); ok {
+        return totalTokens
+    }
+
+    return 0
 }
 
-// RenewSubscription - Renew client subscription
-func RenewSubscription(c *gin.Context) {
-    projectID := c.Param("id")
-    objID, err := primitive.ObjectIDFromHex(projectID)
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
-        return
-    }
-    
-    var renewalData struct {
-        Months int `json:"months"`
-    }
-    
-    if err := c.ShouldBindJSON(&renewalData); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid renewal data"})
-        return
-    }
-    
-    // Calculate new expiry date
-    newExpiryDate := time.Now().AddDate(0, renewalData.Months, 0)
-    
-    collection := config.DB.Collection("projects")
-    update := bson.M{
-        "$set": bson.M{
-            "expiry_date": newExpiryDate,
-            "status": "active",
-            "total_tokens_used": 0, // Reset token usage
-            "updated_at": time.Now(),
-        },
-    }
-    
-    _, err = collection.UpdateOne(context.Background(), bson.M{"_id": objID}, update)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to renew subscription"})
-        return
-    }
-    
-    c.JSON(http.StatusOK, gin.H{
-        "message": "Subscription renewed successfully",
-        "new_expiry_date": newExpiryDate,
-    })
+// GetProjectsDashboard - Get all projects with enhanced filtering and pagination
+func GetProjectsDashboard(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Parse query parameters
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	status := c.Query("status")
+	search := c.Query("search")
+	sortBy := c.DefaultQuery("sort", "created_at")
+	sortOrder := c.DefaultQuery("order", "desc")
+
+	// Build filter
+	filter := bson.M{}
+	if status != "" {
+		filter["status"] = status
+	}
+	if search != "" {
+		filter["$or"] = []bson.M{
+			{"name": bson.M{"$regex": search, "$options": "i"}},
+			{"description": bson.M{"$regex": search, "$options": "i"}},
+			{"project_id": bson.M{"$regex": search, "$options": "i"}},
+		}
+	}
+
+	// Build sort
+	sortDirection := 1
+	if sortOrder == "desc" {
+		sortDirection = -1
+	}
+	sort := bson.D{{sortBy, sortDirection}}
+
+	// Calculate pagination
+	skip := (page - 1) * limit
+
+	collection := config.GetProjectsCollection()
+
+	// Get total count
+	totalCount, err := collection.CountDocuments(ctx, filter)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to count projects"})
+		return
+	}
+
+	// Build aggregation pipeline for enhanced project data
+	pipeline := []bson.M{
+		{"$match": filter},
+		{
+			"$addFields": bson.M{
+				"usage_percentage": bson.M{
+					"$cond": bson.M{
+						"if": bson.M{"$gt": []interface{}{"$monthly_token_limit", 0}},
+						"then": bson.M{
+							"$multiply": []interface{}{
+								bson.M{"$divide": []interface{}{"$total_tokens_used", "$monthly_token_limit"}},
+								100,
+							},
+						},
+						"else": 0,
+					},
+				},
+				"days_until_expiry": bson.M{
+					"$divide": []interface{}{
+						bson.M{"$subtract": []interface{}{"$expiry_date", "$$NOW"}},
+						86400000, // milliseconds in a day
+					},
+				},
+				"estimated_cost": bson.M{
+					"$multiply": []interface{}{
+						"$total_tokens_used",
+						0.000005, // Approximate cost per token in INR
+					},
+				},
+			},
+		},
+		{"$sort": sort},
+		{"$skip": skip},
+		{"$limit": limit},
+	}
+
+	cursor, err := collection.Aggregate(ctx, pipeline)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get projects"})
+		return
+	}
+	defer cursor.Close(ctx)
+
+	var projects []bson.M
+	if err := cursor.All(ctx, &projects); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse projects"})
+		return
+	}
+
+	// Calculate pagination info
+	totalPages := (int(totalCount) + limit - 1) / limit
+
+	c.JSON(http.StatusOK, gin.H{
+		"projects": projects,
+		"pagination": gin.H{
+			"current_page": page,
+			"total_pages":  totalPages,
+			"total_count":  totalCount,
+			"limit":        limit,
+			"has_next":     page < totalPages,
+			"has_prev":     page > 1,
+		},
+		"filters": gin.H{
+			"status": status,
+			"search": search,
+			"sort":   sortBy,
+			"order":  sortOrder,
+		},
+	})
 }
 
+// GetProjectDetails - Get detailed project information with analytics
+func GetProjectDetails(c *gin.Context) {
+	projectID := c.Param("id")
 
-// GetProjectUsage - Get detailed usage statistics for a specific project
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Get project by project_id or _id
+	var project models.Project
+	collection := config.GetProjectsCollection()
+
+	// Try to find by project_id first, then by _id
+	err := collection.FindOne(ctx, bson.M{"project_id": projectID}).Decode(&project)
+	if err != nil {
+		// Try by ObjectID
+		if objID, parseErr := primitive.ObjectIDFromHex(projectID); parseErr == nil {
+			err = collection.FindOne(ctx, bson.M{"_id": objID}).Decode(&project)
+		}
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
+			return
+		}
+	}
+
+	// Get project analytics
+	analytics := getProjectAnalytics(ctx, project.ProjectID)
+
+	// Get recent chat messages
+	recentChats := getRecentChats(ctx, project.ProjectID, 10)
+
+	// Get usage history
+	usageHistory := getUsageHistory(project.ProjectID, 30)
+
+	// Calculate additional metrics
+	usagePercent := float64(0)
+	if project.MonthlyTokenLimit > 0 {
+		usagePercent = float64(project.TotalTokensUsed) / float64(project.MonthlyTokenLimit) * 100
+	}
+
+	daysUntilExpiry := time.Until(project.ExpiryDate).Hours() / 24
+	estimatedCost := float64(project.TotalTokensUsed) * 0.000005 // Approximate cost
+
+	c.JSON(http.StatusOK, gin.H{
+		"project":           project,
+		"usage_percentage":  usagePercent,
+		"days_until_expiry": daysUntilExpiry,
+		"estimated_cost":    estimatedCost,
+		"analytics":         analytics,
+		"recent_chats":      recentChats,
+		"usage_history":     usageHistory,
+	})
+}
+
+// RenewProject - Renew project subscription
+func RenewProject(c *gin.Context) {
+	projectID := c.Param("id")
+
+	var renewData struct {
+		Months      int  `json:"months"`
+		ResetTokens bool `json:"reset_tokens"`
+	}
+
+	if err := c.ShouldBindJSON(&renewData); err != nil {
+		renewData.Months = 1
+		renewData.ResetTokens = true
+	}
+
+	if renewData.Months <= 0 || renewData.Months > 12 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Months must be between 1 and 12"})
+		return
+	}
+
+	collection := config.GetProjectsCollection()
+
+	updateFields := bson.M{
+		"expiry_date":   time.Now().AddDate(0, renewData.Months, 0),
+		"status":        "active",
+		"reminder_sent": false,
+		"updated_at":    time.Now(),
+	}
+
+	if renewData.ResetTokens {
+		updateFields["total_tokens_used"] = int64(0)
+	}
+
+	update := bson.M{"$set": updateFields}
+
+	result, err := collection.UpdateOne(context.Background(),
+		bson.M{"project_id": projectID}, update)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to renew project"})
+		return
+	}
+
+	if result.ModifiedCount == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
+		return
+	}
+
+	// Log renewal action
+	config.LogNotification(primitive.NilObjectID, "renewal",
+		fmt.Sprintf("Project %s renewed for %d month(s)", projectID, renewData.Months))
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":    fmt.Sprintf("Project renewed for %d month(s)", renewData.Months),
+		"new_expiry": time.Now().AddDate(0, renewData.Months, 0),
+		"status":     "active",
+	})
+}
+
+// UpdateProjectStatus - Update project status (active, suspended, expired)
+func UpdateProjectStatus(c *gin.Context) {
+	projectID := c.Param("id")
+
+	var statusData struct {
+		Status string `json:"status" binding:"required"`
+		Reason string `json:"reason"`
+	}
+
+	if err := c.ShouldBindJSON(&statusData); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid status data"})
+		return
+	}
+
+	if !isValidStatus(statusData.Status) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid status. Must be: active, suspended, expired, or deleted",
+		})
+		return
+	}
+
+	collection := config.GetProjectsCollection()
+
+	update := bson.M{
+		"$set": bson.M{
+			"status":     statusData.Status,
+			"updated_at": time.Now(),
+		},
+	}
+
+	result, err := collection.UpdateOne(context.Background(),
+		bson.M{"project_id": projectID}, update)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update status"})
+		return
+	}
+
+	if result.ModifiedCount == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
+		return
+	}
+
+	// Log status change
+	logMessage := fmt.Sprintf("Project %s status changed to %s", projectID, statusData.Status)
+	if statusData.Reason != "" {
+		logMessage += fmt.Sprintf(" (Reason: %s)", statusData.Reason)
+	}
+
+	config.LogNotification(primitive.NilObjectID, "status_change", logMessage)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Project status updated successfully",
+		"status":  statusData.Status,
+	})
+}
+
+// GetProjectUsage - Get detailed usage statistics
 func GetProjectUsage(c *gin.Context) {
-    projectID := c.Param("id")
-    objID, err := primitive.ObjectIDFromHex(projectID)
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
-        return
-    }
+	projectID := c.Param("id")
+	days, _ := strconv.Atoi(c.DefaultQuery("days", "30"))
 
-    // Get project details
-    collection := config.DB.Collection("projects")
-    var project models.Project
-    err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
-    if err != nil {
-        c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
-        return
-    }
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-    // Get usage statistics from Gemini usage logs
-    usageCollection := config.DB.Collection("gemini_usage_logs")
-    
-    // Current month usage
-    startOfMonth := time.Now().AddDate(0, 0, -time.Now().Day()+1)
-    monthlyUsage, _ := usageCollection.CountDocuments(context.Background(), bson.M{
-        "project_id": objID,
-        "timestamp": bson.M{"$gte": startOfMonth},
-    })
+	// Get project
+	var project models.Project
+	collection := config.GetProjectsCollection()
+	err := collection.FindOne(ctx, bson.M{"project_id": projectID}).Decode(&project)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
+		return
+	}
 
-    // Today's usage
-    startOfDay := time.Now().Truncate(24 * time.Hour)
-    dailyUsage, _ := usageCollection.CountDocuments(context.Background(), bson.M{
-        "project_id": objID,
-        "timestamp": bson.M{"$gte": startOfDay},
-    })
+	// Calculate usage metrics
+	usagePercent := float64(0)
+	if project.MonthlyTokenLimit > 0 {
+		usagePercent = float64(project.TotalTokensUsed) / float64(project.MonthlyTokenLimit) * 100
+	}
 
-    // Calculate usage percentages
-    dailyUsagePercent := 0.0
-    if project.GeminiDailyLimit > 0 {
-        dailyUsagePercent = float64(dailyUsage) / float64(project.GeminiDailyLimit) * 100
-    }
+	remainingTokens := project.MonthlyTokenLimit - project.TotalTokensUsed
+	daysUntilExpiry := time.Until(project.ExpiryDate).Hours() / 24
+	estimatedCost := float64(project.TotalTokensUsed) * 0.000005
 
-    monthlyUsagePercent := 0.0
-    if project.GeminiMonthlyLimit > 0 {
-        monthlyUsagePercent = float64(monthlyUsage) / float64(project.GeminiMonthlyLimit) * 100
-    }
+	// Get usage history
+	usageHistory := getUsageHistory(project.ProjectID, days)
 
-    // Token usage percentage
-    tokenUsagePercent := 0.0
-    if project.MonthlyTokenLimit > 0 {
-        tokenUsagePercent = float64(project.TotalTokensUsed) / float64(project.MonthlyTokenLimit) * 100
-    }
+	// Get chat statistics
+	chatStats := getChatStatistics(ctx, projectID)
 
-    c.JSON(http.StatusOK, gin.H{
-        "project_id": projectID,
-        "project_name": project.Name,
-        "subscription_info": gin.H{
-            "status": project.Status,
-            "start_date": project.StartDate,
-            "expiry_date": project.ExpiryDate,
-            "days_remaining": int(time.Until(project.ExpiryDate).Hours() / 24),
-        },
-        "usage_statistics": gin.H{
-            "daily_usage": dailyUsage,
-            "daily_limit": project.GeminiDailyLimit,
-            "daily_usage_percent": dailyUsagePercent,
-            "monthly_usage": monthlyUsage,
-            "monthly_limit": project.GeminiMonthlyLimit,
-            "monthly_usage_percent": monthlyUsagePercent,
-        },
-        "token_usage": gin.H{
-            "total_tokens_used": project.TotalTokensUsed,
-            "monthly_token_limit": project.MonthlyTokenLimit,
-            "token_usage_percent": tokenUsagePercent,
-            "remaining_tokens": project.MonthlyTokenLimit - project.TotalTokensUsed,
-        },
-        "last_activity": project.LastUsed,
-        "created_at": project.CreatedAt,
-        "updated_at": project.UpdatedAt,
-    })
+	c.JSON(http.StatusOK, gin.H{
+		"project_id":        projectID,
+		"tokens_used":       project.TotalTokensUsed,
+		"token_limit":       project.MonthlyTokenLimit,
+		"remaining_tokens":  remainingTokens,
+		"usage_percentage":  usagePercent,
+		"days_until_expiry": daysUntilExpiry,
+		"estimated_cost":    estimatedCost,
+		"usage_history":     usageHistory,
+		"chat_statistics":   chatStats,
+		"status":            project.Status,
+		"last_updated":      project.UpdatedAt,
+	})
 }
 
-
-
-// Update client status
-func UpdateClientStatus(c *gin.Context) {
-    projectID := c.Param("id")
-    objID, err := primitive.ObjectIDFromHex(projectID)
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
-        return
-    }
-    
-    var statusData struct {
-        Status string `json:"status"`
-    }
-    
-    if err := c.ShouldBindJSON(&statusData); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid status data"})
-        return
-    }
-    
-    collection := config.DB.Collection("projects")
-    update := bson.M{
-        "$set": bson.M{
-            "status": statusData.Status,
-            "updated_at": time.Now(),
-        },
-    }
-    
-    _, err = collection.UpdateOne(context.Background(), bson.M{"_id": objID}, update)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update status"})
-        return
-    }
-    
-    c.JSON(http.StatusOK, gin.H{
-        "message": "Status updated successfully",
-        "new_status": statusData.Status,
-    })
-}
-
-// GetNotificationHistory - Get notification history for admin dashboard
+// GetNotificationHistory - Get notification history
 func GetNotificationHistory(c *gin.Context) {
-    collection := config.DB.Collection("notifications")
-    
-    // Get recent notifications (last 30 days)
-    filter := bson.M{
-        "sent_at": bson.M{
-            "$gte": time.Now().AddDate(0, 0, -30),
-        },
-    }
-    
-    cursor, err := collection.Find(context.Background(), filter, 
-        options.Find().SetSort(bson.M{"sent_at": -1}).SetLimit(100))
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get notifications"})
-        return
-    }
-    defer cursor.Close(context.Background())
-    
-    var notifications []bson.M
-    if err := cursor.All(context.Background(), &notifications); err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse notifications"})
-        return
-    }
-    
-    c.JSON(http.StatusOK, gin.H{
-        "notifications": notifications,
-        "count": len(notifications),
-    })
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	notificationType := c.Query("type")
+	projectID := c.Query("project_id")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	collection := config.GetNotificationsCollection()
+
+	// Build filter
+	filter := bson.M{}
+	if notificationType != "" {
+		filter["type"] = notificationType
+	}
+	if projectID != "" {
+		if objID, err := primitive.ObjectIDFromHex(projectID); err == nil {
+			filter["project_id"] = objID
+		}
+	}
+
+	// Calculate pagination
+	skip := (page - 1) * limit
+
+	// Get total count
+	totalCount, err := collection.CountDocuments(ctx, filter)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to count notifications"})
+		return
+	}
+
+	// Get notifications
+	cursor, err := collection.Find(ctx, filter,
+		options.Find().SetSort(bson.M{"sent_at": -1}).SetSkip(int64(skip)).SetLimit(int64(limit)))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get notifications"})
+		return
+	}
+	defer cursor.Close(ctx)
+
+	var notifications []bson.M
+	if err := cursor.All(ctx, &notifications); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse notifications"})
+		return
+	}
+
+	totalPages := (int(totalCount) + limit - 1) / limit
+
+	c.JSON(http.StatusOK, gin.H{
+		"notifications": notifications,
+		"pagination": gin.H{
+			"current_page": page,
+			"total_pages":  totalPages,
+			"total_count":  totalCount,
+			"limit":        limit,
+		},
+	})
 }
 
 // GetProjectNotifications - Get notifications for specific project
 func GetProjectNotifications(c *gin.Context) {
-    projectID := c.Param("id")
-    objID, err := primitive.ObjectIDFromHex(projectID)
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
-        return
-    }
-    
-    collection := config.DB.Collection("notifications")
-    
-    filter := bson.M{
-        "project_id": objID,
-        "sent_at": bson.M{
-            "$gte": time.Now().AddDate(0, 0, -7), // Last 7 days
-        },
-    }
-    
-    cursor, err := collection.Find(context.Background(), filter, 
-        options.Find().SetSort(bson.M{"sent_at": -1}))
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get project notifications"})
-        return
-    }
-    defer cursor.Close(context.Background())
-    
-    var notifications []bson.M
-    if err := cursor.All(context.Background(), &notifications); err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse notifications"})
-        return
-    }
-    
-    c.JSON(http.StatusOK, gin.H{
-        "project_id": projectID,
-        "notifications": notifications,
-        "count": len(notifications),
-    })
+	projectID := c.Param("id")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Convert project_id to ObjectID for notification lookup
+	var project models.Project
+	collection := config.GetProjectsCollection()
+	err := collection.FindOne(ctx, bson.M{"project_id": projectID}).Decode(&project)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
+		return
+	}
+
+	notificationsCol := config.GetNotificationsCollection()
+
+	filter := bson.M{
+		"project_id": project.ID,
+		"sent_at": bson.M{
+			"$gte": time.Now().AddDate(0, 0, -30), // Last 30 days
+		},
+	}
+
+	cursor, err := notificationsCol.Find(ctx, filter,
+		options.Find().SetSort(bson.M{"sent_at": -1}))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get project notifications"})
+		return
+	}
+	defer cursor.Close(ctx)
+
+	var notifications []bson.M
+	if err := cursor.All(ctx, &notifications); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse notifications"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"project_id":    projectID,
+		"notifications": notifications,
+		"count":         len(notifications),
+	})
 }
 
-// TestNotification - Test notification system
+// TestNotification - Send test notification
 func TestNotification(c *gin.Context) {
-    projectID := c.Param("id")
-    objID, err := primitive.ObjectIDFromHex(projectID)
+	projectID := c.Param("id")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Get project
+	var project models.Project
+	collection := config.GetProjectsCollection()
+	err := collection.FindOne(ctx, bson.M{"project_id": projectID}).Decode(&project)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
+		return
+	}
+
+	// Send test notification
+	message := fmt.Sprintf("Test notification for project: %s", project.Name)
+	err = config.LogNotification(project.ID, "test", message)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send test notification"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Test notification sent successfully",
+		"project": project.Name,
+	})
+}
+
+// GetSystemStats - Get comprehensive system statistics
+func GetSystemStats(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	stats := getDashboardStats(ctx)
+	dbStats := config.GetDatabaseStats()
+
+	c.JSON(http.StatusOK, gin.H{
+		"system_stats":   stats,
+		"database_stats": dbStats,
+		"timestamp":      time.Now(),
+	})
+}
+
+// Helper Functions
+
+// getDashboardStats - Get comprehensive dashboard statistics
+func getDashboardStats(ctx context.Context) map[string]interface{} {
+	stats := make(map[string]interface{})
+
+	// Projects statistics
+	projectsCol := config.GetProjectsCollection()
+
+	totalProjects, _ := projectsCol.CountDocuments(ctx, bson.M{})
+	activeProjects, _ := projectsCol.CountDocuments(ctx, bson.M{"status": "active"})
+	expiredProjects, _ := projectsCol.CountDocuments(ctx, bson.M{"status": "expired"})
+	suspendedProjects, _ := projectsCol.CountDocuments(ctx, bson.M{"status": "suspended"})
+
+	// Token usage statistics
+	pipeline := []bson.M{
+		{
+			"$group": bson.M{
+				"_id":          nil,
+				"total_tokens": bson.M{"$sum": "$total_tokens_used"},
+				"avg_tokens":   bson.M{"$avg": "$total_tokens_used"},
+				"total_limit":  bson.M{"$sum": "$monthly_token_limit"},
+			},
+		},
+	}
+
+	cursor, err := projectsCol.Aggregate(ctx, pipeline)
+	var tokenStats bson.M
+	if err == nil {
+		defer cursor.Close(ctx)
+		if cursor.Next(ctx) {
+			cursor.Decode(&tokenStats)
+		}
+	}
+
+	// Recent activity
+	recentProjects, _ := projectsCol.CountDocuments(ctx, bson.M{
+		"created_at": bson.M{"$gte": time.Now().AddDate(0, 0, -7)},
+	})
+
+	stats["projects"] = map[string]interface{}{
+		"total":     totalProjects,
+		"active":    activeProjects,
+		"expired":   expiredProjects,
+		"suspended": suspendedProjects,
+		"recent":    recentProjects,
+	}
+
+	if tokenStats != nil {
+		stats["tokens"] = tokenStats
+	}
+
+	return stats
+}
+
+// getRecentActivity - Get recent system activity
+func getRecentActivity(ctx context.Context) []map[string]interface{} {
+	var activities []map[string]interface{}
+
+	// Get recent projects
+	projectsCol := config.GetProjectsCollection()
+	cursor, err := projectsCol.Find(ctx, bson.M{},
+		options.Find().SetSort(bson.M{"created_at": -1}).SetLimit(5))
+	if err == nil {
+		defer cursor.Close(ctx)
+		for cursor.Next(ctx) {
+			var project bson.M
+			if cursor.Decode(&project) == nil {
+				activities = append(activities, map[string]interface{}{
+					"type":        "project_created",
+					"description": fmt.Sprintf("Project '%s' was created", project["name"]),
+					"timestamp":   project["created_at"],
+				})
+			}
+		}
+	}
+
+	return activities
+}
+
+// getSystemHealth - Get system health status
+func getSystemHealth() map[string]interface{} {
+	health := make(map[string]interface{})
+
+	// Database health
+	if err := config.HealthCheck(); err != nil {
+		health["database"] = "unhealthy"
+		health["database_error"] = err.Error()
+	} else {
+		health["database"] = "healthy"
+	}
+
+	// System status
+	health["status"] = "operational"
+	health["uptime"] = time.Now().Format(time.RFC3339)
+
+	return health
+}
+
+// getProjectAnalytics - Get project analytics
+func getProjectAnalytics(ctx context.Context, projectID string) map[string]interface{} {
+	analytics := make(map[string]interface{})
+
+	// Get chat message count
+	chatCol := config.GetChatMessagesCollection()
+	messageCount, _ := chatCol.CountDocuments(ctx, bson.M{"project_id": projectID})
+
+	// Get recent message count (last 7 days)
+	recentCount, _ := chatCol.CountDocuments(ctx, bson.M{
+		"project_id": projectID,
+		"timestamp":  bson.M{"$gte": time.Now().AddDate(0, 0, -7)},
+	})
+
+	analytics["total_messages"] = messageCount
+	analytics["recent_messages"] = recentCount
+
+	return analytics
+}
+
+// getRecentChats - Get recent chat messages
+func getRecentChats(ctx context.Context, projectID string, limit int) []bson.M {
+	var chats []bson.M
+
+	chatCol := config.GetChatMessagesCollection()
+	cursor, err := chatCol.Find(ctx, bson.M{"project_id": projectID},
+		options.Find().SetSort(bson.M{"timestamp": -1}).SetLimit(int64(limit)))
+	if err == nil {
+		defer cursor.Close(ctx)
+		cursor.All(ctx, &chats)
+	}
+
+	return chats
+}
+
+// getChatStatistics - Get chat statistics
+func getChatStatistics(ctx context.Context, projectID string) map[string]interface{} {
+	stats := make(map[string]interface{})
+
+	chatCol := config.GetChatMessagesCollection()
+
+	// Total messages
+	totalMessages, _ := chatCol.CountDocuments(ctx, bson.M{"project_id": projectID})
+
+	// Messages today
+	today := time.Now().Truncate(24 * time.Hour)
+	todayMessages, _ := chatCol.CountDocuments(ctx, bson.M{
+		"project_id": projectID,
+		"timestamp":  bson.M{"$gte": today},
+	})
+
+	// Messages this week
+	weekStart := today.AddDate(0, 0, -int(today.Weekday()))
+	weekMessages, _ := chatCol.CountDocuments(ctx, bson.M{
+		"project_id": projectID,
+		"timestamp":  bson.M{"$gte": weekStart},
+	})
+
+	stats["total_messages"] = totalMessages
+	stats["today_messages"] = todayMessages
+	stats["week_messages"] = weekMessages
+
+	return stats
+}
+
+// isValidStatus - Validate project status
+func isValidStatus(status string) bool {
+	validStatuses := []string{"active", "suspended", "expired", "deleted"}
+	for _, validStatus := range validStatuses {
+		if status == validStatus {
+			return true
+		}
+	}
+	return false
+}
+
+// extractPDFContent - Extract text content from PDF file
+func extractPDFContent(filePath string) (string, error) {
+    file, err := os.Open(filePath)
     if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
-        return
+        return "", err
+    }
+    defer file.Close()
+
+    // Get file info
+    info, err := file.Stat()
+    if err != nil {
+        return "", err
+    }
+
+    // Read PDF content using pdf library
+    reader, err := pdf.NewReader(file, info.Size())
+    if err != nil {
+        return "", err
+    }
+
+    var content strings.Builder
+    
+    // Extract text from each page
+    for i := 1; i <= reader.NumPage(); i++ {
+        page := reader.Page(i)
+        if page.V.IsNull() {
+            continue
+        }
+        
+        // ✅ Fix: GetPlainText requires font map parameter
+        text, err := page.GetPlainText(nil)
+        if err != nil {
+            log.Printf("⚠️ Failed to extract text from page %d: %v", i, err)
+            continue
+        }
+        
+        content.WriteString(text)
+        content.WriteString("\n")
+    }
+
+    return content.String(), nil
+}
+
+func generateOpenAIEmbeddings(content string) ([]float64, error) {
+    apiKey := os.Getenv("OPENAI_API_KEY")
+    if apiKey == "" {
+        return nil, fmt.Errorf("OpenAI API key not configured")
+    }
+
+    client := openai.NewClient(apiKey)
+    
+    // Truncate content if too long (OpenAI has token limits)
+    if len(content) > 8000 {
+        content = content[:8000]
     }
     
-    // Get project
-    collection := config.DB.Collection("projects")
-    var project models.Project
-    err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
-    if err != nil {
-        c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
-        return
+    // Create embedding request
+    req := openai.EmbeddingRequest{
+        Input: []string{content},
+        Model: openai.AdaEmbeddingV2,
     }
     
-    // Send test notification
-    message := fmt.Sprintf("Test notification for project: %s", project.Name)
-    err = config.LogNotification(objID, "test", message)
+    resp, err := client.CreateEmbeddings(context.Background(), req)
     if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send test notification"})
-        return
+        return nil, fmt.Errorf("failed to create embeddings: %v", err)
     }
     
-    c.JSON(http.StatusOK, gin.H{
-        "message": "Test notification sent successfully",
-        "project": project.Name,
-    })
+    if len(resp.Data) == 0 {
+        return nil, fmt.Errorf("no embeddings generated")
+    }
+
+    // Convert []float32 to []float64
+    embedding32 := resp.Data[0].Embedding
+    embedding64 := make([]float64, len(embedding32))
+    for i, v := range embedding32 {
+        embedding64[i] = float64(v)
+    }
+    return embedding64, nil
 }

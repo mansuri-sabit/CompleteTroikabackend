@@ -2,10 +2,8 @@ package handlers
 
 import (
 	"context"
-	"crypto/md5"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
+
 	"net/http"
 	"os"
 	"time"
@@ -13,11 +11,13 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+
 	"jevi-chat/config"
 	"jevi-chat/models"
+	"jevi-chat/middleware"
 )
 
-// GET /embed/:projectId
+// EmbedChat - GET /embed/:projectId
 func EmbedChat(c *gin.Context) {
 	projectID := c.Param("projectId")
 
@@ -39,7 +39,7 @@ func EmbedChat(c *gin.Context) {
 	}
 
 	// Fetch project from DB
-	projectCollection := config.DB.Collection("projects")
+	projectCollection := config.GetCollection("projects")
 	var project models.Project
 	err = projectCollection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
 	if err != nil || !project.IsActive {
@@ -47,17 +47,25 @@ func EmbedChat(c *gin.Context) {
 		return
 	}
 
-	// Validate token
-	userID, err := validateUserToken(userToken)
+	// Validate token using middleware function
+	claims, err := validateUserToken(userToken)
 	if err != nil {
 		c.Redirect(http.StatusFound, fmt.Sprintf("/embed/%s", projectID))
 		return
 	}
 
+	// Extract userID from claims
+	userID := claims.UserID
+
 	// Fetch user
-	userCollection := config.DB.Collection("chat_users")
+	userCollection := config.GetCollection("chat_users")
 	var user models.ChatUser
-	userObjID, _ := primitive.ObjectIDFromHex(userID)
+	userObjID, err := primitive.ObjectIDFromHex(userID)
+	if err != nil {
+		c.Redirect(http.StatusFound, fmt.Sprintf("/embed/%s", projectID))
+		return
+	}
+
 	err = userCollection.FindOne(context.Background(), bson.M{"_id": userObjID}).Decode(&user)
 	if err != nil {
 		c.Redirect(http.StatusFound, fmt.Sprintf("/embed/%s", projectID))
@@ -74,7 +82,7 @@ func EmbedChat(c *gin.Context) {
 	})
 }
 
-// POST /embed/:projectId/auth
+// EmbedAuth - POST /embed/:projectId/auth
 func EmbedAuth(c *gin.Context) {
 	projectID := c.Param("projectId")
 
@@ -96,14 +104,15 @@ func EmbedAuth(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid project"})
 		return
 	}
-	projectCollection := config.DB.Collection("projects")
+
+	projectCollection := config.GetCollection("projects")
 	var project models.Project
 	if err := projectCollection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "Project not found"})
 		return
 	}
 
-	userCollection := config.DB.Collection("chat_users")
+	userCollection := config.GetCollection("chat_users")
 
 	if authData.Mode == "register" {
 		// Check if user exists
@@ -117,14 +126,25 @@ func EmbedAuth(c *gin.Context) {
 			return
 		}
 
+		// Hash password using middleware function
+		hashedPassword, err := middleware.HashPassword(authData.Password)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to process password"})
+			return
+		}
+
 		// Create new user
 		user := models.ChatUser{
-			ProjectID: projectID,
-			Name:      authData.Name,
-			Email:     authData.Email,
-			Password:  hashPassword(authData.Password),
-			IsActive:  true,
-			CreatedAt: time.Now(),
+			ProjectID:     projectID,
+			Name:          authData.Name,
+			Email:         authData.Email,
+			Password:      hashedPassword,
+			IsActive:      true,
+			TotalSessions: 0,
+			TotalMessages: 0,
+			TotalTokens:   0,
+			CreatedAt:     time.Now(),
+			UpdatedAt:     time.Now(),
 		}
 
 		result, err := userCollection.InsertOne(context.Background(), user)
@@ -134,7 +154,20 @@ func EmbedAuth(c *gin.Context) {
 		}
 
 		user.ID = result.InsertedID.(primitive.ObjectID)
-		token := generateUserToken(user.ID.Hex())
+		
+		// Create a temporary User object for token generation
+		tempUser := &models.User{
+			ID:    user.ID,
+			Name:  user.Name,
+			Email: user.Email,
+			Role:  "chat_user",
+		}
+		
+		token, err := middleware.GenerateJWTToken(tempUser)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to generate token"})
+			return
+		}
 
 		c.JSON(http.StatusOK, gin.H{
 			"success": true,
@@ -154,7 +187,13 @@ func EmbedAuth(c *gin.Context) {
 		"project_id": projectID,
 		"email":      authData.Email,
 	}).Decode(&user)
-	if err != nil || !verifyPassword(authData.Password, user.Password) {
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Invalid credentials"})
+		return
+	}
+
+	// Verify password using middleware function
+	if !middleware.CheckPasswordHash(authData.Password, user.Password) {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Invalid credentials"})
 		return
 	}
@@ -164,7 +203,20 @@ func EmbedAuth(c *gin.Context) {
 		return
 	}
 
-	token := generateUserToken(user.ID.Hex())
+	// Create a temporary User object for token generation
+	tempUser := &models.User{
+		ID:    user.ID,
+		Name:  user.Name,
+		Email: user.Email,
+		Role:  "chat_user",
+	}
+	
+	token, err := middleware.GenerateJWTToken(tempUser)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to generate token"})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"user": gin.H{
@@ -176,87 +228,92 @@ func EmbedAuth(c *gin.Context) {
 	})
 }
 
-// GET /embed/:projectId/chat - Health check or future UI
+// IframeChatInterface - GET /embed/:projectId/chat
 func IframeChatInterface(c *gin.Context) {
-    projectID := c.Param("projectId")
+	projectID := c.Param("projectId")
 
-    objID, err := primitive.ObjectIDFromHex(projectID)
-    if err != nil {
-        c.String(http.StatusBadRequest, "Invalid project ID")
-        return
-    }
+	objID, err := primitive.ObjectIDFromHex(projectID)
+	if err != nil {
+		c.String(http.StatusBadRequest, "Invalid project ID")
+		return
+	}
 
-    var project models.Project
-    err = config.DB.Collection("projects").FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
-    if err != nil {
-        c.String(http.StatusNotFound, "Project not found")
-        return
-    }
+	var project models.Project
+	err = config.GetCollection("projects").FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
+	if err != nil {
+		c.String(http.StatusNotFound, "Project not found")
+		return
+	}
 
-    // ✅ Render the chat.html template
-    c.HTML(http.StatusOK, "embed/chat.html", gin.H{
-        "project":     project,
-        "project_id":  project.ID.Hex(),
-        "api_url":     os.Getenv("APP_URL"), // e.g. https://troikabackend.onrender.com
-    })
+	// Check if project is active
+	if !project.IsActive {
+		c.String(http.StatusForbidden, "Project is inactive")
+		return
+	}
+
+	// Render the chat.html template
+	c.HTML(http.StatusOK, "embed/chat.html", gin.H{
+		"project":    project,
+		"project_id": project.ID.Hex(),
+		"api_url":    os.Getenv("APP_URL"),
+	})
 }
 
-
-// Simple health check
+// EmbedHealth - Simple health check
 func EmbedHealth(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status":    "healthy",
-		"service":   "jevi-chat-embed",
+		"service":   "troika-tech-embed",
 		"timestamp": time.Now().Format(time.RFC3339),
 	})
 }
 
-// Utility functions
-func hashPassword(password string) string {
-	hash := md5.Sum([]byte(password + "jevi_salt"))
-	return hex.EncodeToString(hash[:])
-}
-
-func verifyPassword(password, hash string) bool {
-	return hashPassword(password) == hash
-}
-
-func generateUserToken(userID string) string {
-	bytes := make([]byte, 16)
-	rand.Read(bytes)
-	return fmt.Sprintf("%s_%s_%d", userID, hex.EncodeToString(bytes), time.Now().Unix())
-}
-
-// GET /embed/:projectId/auth - Show authentication page
+// ShowEmbedAuth - GET /embed/:projectId/auth
 func ShowEmbedAuth(c *gin.Context) {
-    projectID := c.Param("projectId")
-    
-    // Validate project ID
-    objID, err := primitive.ObjectIDFromHex(projectID)
-    if err != nil {
-        c.HTML(http.StatusOK, "error.html", gin.H{"error": "Invalid project ID"})
-        return
-    }
-    
-    // Get project details
-    collection := config.DB.Collection("projects")
-    var project models.Project
-    err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
-    if err != nil {
-        c.HTML(http.StatusOK, "error.html", gin.H{"error": "Project not found"})
-        return
-    }
-    
-    // Check if project is active
-    if !project.IsActive {
-        c.HTML(http.StatusOK, "error.html", gin.H{"error": "Project is inactive"})
-        return
-    }
-    
-    // Render authentication page
-    c.HTML(http.StatusOK, "embed/auth.html", gin.H{
-        "project":    project,
-        "project_id": projectID,
-        "api_url":    os.Getenv("APP_URL"),
-    })
+	projectID := c.Param("projectId")
+
+	// Validate project ID
+	objID, err := primitive.ObjectIDFromHex(projectID)
+	if err != nil {
+		c.HTML(http.StatusOK, "error.html", gin.H{"error": "Invalid project ID"})
+		return
+	}
+
+	// Get project details
+	collection := config.GetCollection("projects")
+	var project models.Project
+	err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
+	if err != nil {
+		c.HTML(http.StatusOK, "error.html", gin.H{"error": "Project not found"})
+		return
+	}
+
+	// Check if project is active
+	if !project.IsActive {
+		c.HTML(http.StatusOK, "error.html", gin.H{"error": "Project is inactive"})
+		return
+	}
+
+	// Render authentication page
+	c.HTML(http.StatusOK, "embed/auth.html", gin.H{
+		"project":    project,
+		"project_id": projectID,
+		"api_url":    os.Getenv("APP_URL"),
+	})
+}
+
+// validateUserToken - Validates JWT token and returns claims (uses middleware validation)
+func validateUserToken(tokenString string) (*middleware.JWTClaims, error) {
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		return nil, fmt.Errorf("JWT secret not configured")
+	}
+
+	// Use the same validation logic as middleware but return the claims directly
+	claims, err := middleware.ValidateJWTToken(tokenString)
+	if err != nil {
+		return nil, err
+	}
+
+	return claims, nil
 }
