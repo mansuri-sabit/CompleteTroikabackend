@@ -4,7 +4,7 @@
     // Widget Configuration
     const CONFIG = {
         projectId: null,
-        apiUrl: 'http://localhost:8080',
+        apiUrl: 'https://completetroikabackend.onrender.com',
         theme: 'default',
         position: 'bottom-right',
         primaryColor: '#4f46e5',
