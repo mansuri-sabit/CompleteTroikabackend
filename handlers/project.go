@@ -516,7 +516,7 @@ func generateRandomString(length int) string {
 func generateEmbedCode(projectID string) string {
 	baseURL := os.Getenv("BASE_URL")
 	if baseURL == "" {
-		baseURL = "https://your-domain.com"
+		baseURL = "https://completetroikabackend.onrender.com"
 	}
 
 	return fmt.Sprintf(`<script>
