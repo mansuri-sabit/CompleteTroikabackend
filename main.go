@@ -68,56 +68,55 @@ func main() {
 	gin.SetMode(os.Getenv("GIN_MODE")) // release | debug (default)
 	r := gin.New()
 
-	// 🔥 ENHANCED: Force CORS headers before other middleware to fix CORS issues
-	r.Use(func(c *gin.Context) {
-		origin := c.Request.Header.Get("Origin")
-		
-		// Log CORS requests for debugging
-		log.Printf("🌐 CORS Request - Origin: %s, Method: %s, Path: %s", 
-			origin, c.Request.Method, c.Request.URL.Path)
-		
-		// Define allowed origins
-		allowedOrigins := []string{
-			"https://troika-admin-dashborad.onrender.com",
-			"https://troikacompletefrontend.onrender.com",
-			"https://admin.troikatech.com",
-			"http://localhost:3000",
-			"http://localhost:3001",
-			"http://127.0.0.1:3000",
-		}
-		
-		// Check if origin is allowed
-		isAllowed := false
-		for _, allowedOrigin := range allowedOrigins {
-			if origin == allowedOrigin {
-				isAllowed = true
-				break
-			}
-		}
-		
-		// Set CORS headers
-		if isAllowed || os.Getenv("ENVIRONMENT") == "development" {
-			c.Header("Access-Control-Allow-Origin", origin)
-			log.Printf("✅ CORS Allowed for origin: %s", origin)
-		} else if origin != "" {
-			log.Printf("❌ CORS Blocked for origin: %s", origin)
-		}
-		
-		c.Header("Access-Control-Allow-Credentials", "true")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept, Origin, Cache-Control, X-CSRF-Token")
-		// 🔥 FIX: Include ALL HTTP methods including PATCH for project status updates
-		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD")
-		c.Header("Access-Control-Max-Age", "86400")
-		
-		// Handle preflight requests
-		if c.Request.Method == "OPTIONS" {
-			log.Printf("🔄 CORS Preflight request handled for %s", c.Request.URL.Path)
-			c.AbortWithStatus(http.StatusNoContent)
-			return
-		}
-		
-		c.Next()
-	})
+// Add this BEFORE your existing middleware in main.go
+r.Use(func(c *gin.Context) {
+    origin := c.Request.Header.Get("Origin")
+    
+    // Log CORS requests for debugging
+    log.Printf("🌐 CORS Request - Origin: %s, Method: %s, Path: %s", 
+        origin, c.Request.Method, c.Request.URL.Path)
+    
+    // Define allowed origins
+    allowedOrigins := []string{
+        "https://troika-admin-dashborad.onrender.com",
+        "https://troikacompletefrontend.onrender.com",
+        "https://admin.troikatech.com",
+        "http://localhost:3000",
+        "http://localhost:3001",
+    }
+    
+    // Check if origin is allowed
+    isAllowed := false
+    for _, allowedOrigin := range allowedOrigins {
+        if origin == allowedOrigin {
+            isAllowed = true
+            break
+        }
+    }
+    
+    if isAllowed || os.Getenv("ENVIRONMENT") == "development" {
+        c.Header("Access-Control-Allow-Origin", origin)
+        log.Printf("✅ CORS Allowed for origin: %s", origin)
+    }
+    
+    c.Header("Access-Control-Allow-Credentials", "true")
+    c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept, Origin, Cache-Control")
+    
+    // 🔥 CRITICAL FIX: Include ALL HTTP methods including PATCH
+    c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD")
+    
+    c.Header("Access-Control-Max-Age", "86400")
+    
+    // Handle preflight requests
+    if c.Request.Method == "OPTIONS" {
+        log.Printf("🔄 CORS Preflight request handled for %s", c.Request.URL.Path)
+        c.AbortWithStatus(http.StatusNoContent)
+        return
+    }
+    
+    c.Next()
+})
+
 
 	// Global middleware – order matters
 	r.Use(
@@ -143,9 +142,9 @@ func main() {
 				"domain":    getDomain(),
 			})
 		})
-		
-		public.GET("/ping", func(c *gin.Context) { 
-			c.String(http.StatusOK, "pong") 
+
+		public.GET("/ping", func(c *gin.Context) {
+			c.String(http.StatusOK, "pong")
 		})
 
 		// 🔥 NEW: CORS test endpoint for debugging
@@ -195,7 +194,7 @@ func main() {
 		c.Header("Access-Control-Allow-Origin", "*") // Allow embedding on any domain
 		c.Header("Access-Control-Allow-Methods", "GET")
 		c.Header("Access-Control-Allow-Headers", "Content-Type")
-		
+
 		// Check if widget.js file exists
 		if _, err := os.Stat("./static/widget.js"); os.IsNotExist(err) {
 			log.Printf("⚠️ Widget.js file not found at ./static/widget.js")
@@ -205,7 +204,7 @@ func main() {
 			})
 			return
 		}
-		
+
 		c.File("./static/widget.js")
 	})
 
@@ -248,7 +247,7 @@ func main() {
 		admin.GET("/projects/:id/embed", func(c *gin.Context) {
 			projectID := c.Param("id")
 			domain := getDomain()
-			
+
 			// Generate proper embed code with actual domain
 			embedCode := fmt.Sprintf(`<script>
 (function() {
@@ -259,16 +258,16 @@ func main() {
     document.head.appendChild(script);
 })();
 </script>`, domain, projectID)
-			
+
 			c.JSON(http.StatusOK, gin.H{
-				"embed_code":  embedCode,
-				"widget_url":  fmt.Sprintf("%s/widget.js", domain),
-				"project_id":  projectID,
-				"domain":      domain,
-				"iframe_url":  fmt.Sprintf("%s/embed/%s", domain, projectID),
+				"embed_code": embedCode,
+				"widget_url": fmt.Sprintf("%s/widget.js", domain),
+				"project_id": projectID,
+				"domain":     domain,
+				"iframe_url": fmt.Sprintf("%s/embed/%s", domain, projectID),
 			})
 		})
-		
+
 		admin.POST("/projects/:id/embed/regenerate", handlers.RegenerateEmbedCode)
 
 		// Subscription actions

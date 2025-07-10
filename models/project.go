@@ -57,16 +57,23 @@ type Project struct {
 }
 
 // ProjectWidgetConfig represents the embeddable widget configuration (renamed to avoid conflict)
+// Add this to your models/project.go
 type ProjectWidgetConfig struct {
-	Theme            string `bson:"theme" json:"theme"`
-	PrimaryColor     string `bson:"primary_color" json:"primary_color"`
-	SecondaryColor   string `bson:"secondary_color" json:"secondary_color"`
-	WelcomeMessage   string `bson:"welcome_message" json:"welcome_message"`
-	Position         string `bson:"position" json:"position"`
-	ShowBranding     bool   `bson:"show_branding" json:"show_branding"`
-	EnableFileUpload bool   `bson:"enable_file_upload" json:"enable_file_upload"`
-	EnableRating     bool   `bson:"enable_rating" json:"enable_rating"`
+    Theme            string `json:"theme" bson:"theme"`
+    PrimaryColor     string `json:"primary_color" bson:"primary_color"`
+    WelcomeMessage   string `json:"welcome_message" bson:"welcome_message"`
+    Position         string `json:"position" bson:"position"`
+    ShowBranding     bool   `json:"show_branding" bson:"show_branding"`
+    EnableFileUpload bool   `json:"enable_file_upload" bson:"enable_file_upload"`
+    EnableRating     bool   `json:"enable_rating" bson:"enable_rating"`
+    Placeholder      string `json:"placeholder" bson:"placeholder"`
+    Height           string `json:"height" bson:"height"`
+    Width            string `json:"width" bson:"width"`
+    EnableSound      bool   `json:"enable_sound" bson:"enable_sound"`
+    AutoOpen         bool   `json:"auto_open" bson:"auto_open"`
+    TriggerDelay     int    `json:"trigger_delay" bson:"trigger_delay"`
 }
+
 
 // PDFFile represents an uploaded PDF file
 type PDFFile struct {

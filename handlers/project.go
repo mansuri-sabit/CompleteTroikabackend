@@ -16,7 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
-	
+      "go.mongodb.org/mongo-driver/mongo"  
 	"jevi-chat/config"
 	"jevi-chat/models"
 
@@ -341,71 +341,156 @@ func ReactivateProject(c *gin.Context) {
 	})
 }
 
+
+// getDomain returns the appropriate domain based on environment
+func getDomain() string {
+    if domain := os.Getenv("DOMAIN"); domain != "" {
+        return domain
+    }
+    if os.Getenv("ENVIRONMENT") == "production" {
+        return "https://completetroikabackend.onrender.com"
+    }
+    return "http://localhost:8080"
+}
+
 // GetEmbedCode - Get embeddable widget code
+// GetEmbedCode - Get embeddable widget code with enhanced configuration
 func GetEmbedCode(c *gin.Context) {
     projectID := c.Param("id")
-    
-    // Get the actual domain from environment or request
-    domain := os.Getenv("DOMAIN")
-    if domain == "" {
-        // Fallback to your actual backend domain
-        domain = "https://completetroikabackend.onrender.com"
+
+    // Get project details
+    project, err := getProjectByID(projectID)
+    if err != nil {
+        if err == mongo.ErrNoDocuments {
+            c.JSON(http.StatusNotFound, gin.H{
+                "error": "Project not found",
+            })
+            return
+        }
+        c.JSON(http.StatusInternalServerError, gin.H{
+            "error": "Failed to fetch project",
+        })
+        return
     }
-    
-    // Generate proper embed code
-    embedCode := fmt.Sprintf(`<script>
-(function() {
-    var script = document.createElement('script');
-    script.src = '%s/widget.js';
-    script.setAttribute('data-project-id', '%s');
-    script.async = true;
-    document.head.appendChild(script);
-})();
-</script>`, domain, projectID)
-    
+
+    // Generate enhanced embed code
+    embedCode := generateEnhancedEmbedCode(projectID, project.WidgetSettings)
+    domain := getDomain()
+
     c.JSON(http.StatusOK, gin.H{
-        "embed_code": embedCode,
-        "widget_url": fmt.Sprintf("%s/widget.js", domain),
-        "project_id": projectID,
+        "success":     true,
+        "embed_code":  embedCode,
+        "widget_url":  fmt.Sprintf("%s/widget.js", domain),
+        "project_id":  projectID,
+        "domain":      domain,
     })
 }
 
 
-// RegenerateEmbedCode - Generate new embed code
+
+// RegenerateEmbedCode - Generate new embed code with enhanced configuration
 func RegenerateEmbedCode(c *gin.Context) {
-	projectID := c.Param("id")
+    projectID := c.Param("id")
+    userRole := c.GetString("user_role")
 
-	newEmbedCode := generateEmbedCode(projectID)
+    if userRole != "admin" {
+        c.JSON(http.StatusForbidden, gin.H{
+            "error": "Admin access required",
+        })
+        return
+    }
 
-	collection := config.DB.Collection("projects")
-	update := bson.M{
-		"$set": bson.M{
-			"embed_code": newEmbedCode,
-			"updated_at": time.Now(),
-		},
-	}
+    // Get project details to access widget settings
+    project, err := getProjectByID(projectID)
+    if err != nil {
+        if err == mongo.ErrNoDocuments {
+            c.JSON(http.StatusNotFound, gin.H{
+                "error": "Project not found",
+            })
+            return
+        }
+        c.JSON(http.StatusInternalServerError, gin.H{
+            "error": "Failed to fetch project",
+        })
+        return
+    }
 
-	result, err := collection.UpdateOne(context.Background(),
-		bson.M{"project_id": projectID}, update)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to regenerate embed code"})
-		return
-	}
+    // Generate enhanced embed code
+    embedCode := generateEnhancedEmbedCode(projectID, project.WidgetSettings)
+    
+    // Get domain
+    domain := getDomain()
 
-	if result.ModifiedCount == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message":    "Embed code regenerated successfully",
-		"embed_code": newEmbedCode,
-	})
+    c.JSON(http.StatusOK, gin.H{
+        "success":     true,
+        "embed_code":  embedCode,
+        "widget_url":  fmt.Sprintf("%s/widget.js", domain),
+        "project_id":  projectID,
+        "domain":      domain,
+        "iframe_url":  fmt.Sprintf("%s/embed/%s", domain, projectID),
+    })
 }
 
-// DeleteProject - Soft delete project
+// generateEnhancedEmbedCode - Generate embeddable widget code with full configuration
+func generateEnhancedEmbedCode(projectID string, widgetSettings models.ProjectWidgetConfig) string {
+    domain := getDomain()
+    
+    return fmt.Sprintf(`<!-- Troika Tech Chatbot Widget -->
+<div id="troika-chatbot-%s"></div>
+<script>
+  (function() {
+    var config = {
+      projectId: '%s',
+      theme: '%s',
+      position: '%s',
+      primaryColor: '%s',
+      welcomeMessage: '%s',
+      placeholder: '%s',
+      height: '%s',
+      width: '%s',
+      showBranding: %v,
+      enableSound: %v,
+      autoOpen: %v,
+      triggerDelay: %d,
+      apiUrl: '%s/api'
+    };
+    
+    var script = document.createElement('script');
+    script.src = '%s/widget.js';
+    script.setAttribute('data-project-id', '%s');
+    script.onload = function() {
+      if (typeof TroikaChatbot !== 'undefined') {
+        TroikaChatbot.init(config);
+      } else {
+        console.error('TroikaChatbot not loaded');
+      }
+    };
+    script.onerror = function() {
+      console.error('Failed to load Troika Chatbot widget');
+    };
+    script.async = true;
+    document.head.appendChild(script);
+  })();
+</script>`, 
+        projectID,                           // div id
+        projectID,                           // config.projectId
+        widgetSettings.Theme,                // config.theme
+        widgetSettings.Position,             // config.position
+        widgetSettings.PrimaryColor,         // config.primaryColor
+        widgetSettings.WelcomeMessage,       // config.welcomeMessage
+        "Type your message...",              // config.placeholder (default)
+        "500px",                            // config.height (default)
+        "350px",                            // config.width (default)
+        widgetSettings.ShowBranding,         // config.showBranding
+        true,                               // config.enableSound (default)
+        false,                              // config.autoOpen (default)
+        3000,                               // config.triggerDelay (default)
+        domain,                             // config.apiUrl
+        domain,                             // script.src
+        projectID)                          // data-project-id
+}
 
-// Helper Functions
+
 
 // generateUniqueProjectID - Generate unique project identifier
 func generateUniqueProjectID() string {
