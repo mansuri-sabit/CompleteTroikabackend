@@ -9,7 +9,8 @@ import (
 	"math/big"
 	"net/http"
 	"os"
-
+	"math"
+"go.mongodb.org/mongo-driver/mongo/options"
 	"time"
 	"path/filepath"
 	"github.com/gin-gonic/gin"
@@ -509,3 +510,32 @@ func DeleteProject(c *gin.Context) {
     })
 }
 
+
+
+// GET /api/admin/projects?page=1&limit=10
+func GetProjects(c *gin.Context) {
+    page,  _ := strconv.Atoi(c.DefaultQuery("page",  "1"))
+    limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
+
+    skip := (page - 1) * limit
+
+    opts  := options.Find().SetSkip(int64(skip)).SetLimit(int64(limit)).
+                     SetSort(bson.D{{"created_at", -1}})
+
+    cur, _ := config.GetProjectsCollection().Find(context.Background(), bson.M{}, opts)
+
+    var projects []models.Project
+    cur.All(c, &projects)
+
+    total, _ := config.GetProjectsCollection().CountDocuments(c, bson.M{})
+
+    c.JSON(http.StatusOK, gin.H{
+        "projects": projects,
+        "pagination": gin.H{
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "pages": int(math.Ceil(float64(total)/float64(limit))),
+        },
+    })
+}

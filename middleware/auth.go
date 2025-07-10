@@ -21,12 +21,14 @@ import (
 
 // JWTClaims represents the JWT token claims
 type JWTClaims struct {
-	UserID               string `json:"user_id"`
-	Email                string `json:"email"`
-	Role                 string `json:"role"`
-	Name                 string `json:"name"`
-	jwt.RegisteredClaims        // Use RegisteredClaims instead of deprecated fields
+	UserID string `json:"user_id"`
+	Email  string `json:"email"`
+	Role   string `json:"role"`
+	Name   string `json:"name"`
+	// Use RegisteredClaims instead of deprecated fields
+	jwt.RegisteredClaims
 }
+
 
 // AuthMiddleware - Main authentication middleware for protected routes
 // AuthMiddleware में admin के लिए special handling
@@ -185,7 +187,7 @@ func CORSMiddleware() gin.HandlerFunc {
 			"http://localhost:3000",
 			"http://localhost:3001",
             "http://127.0.0.1:3000",
-			"http://192.168.1.159:3000", // ✅ Alternative localhost
+			"http://192.168.1.159:3000",
 			"https://troikacompletefrontend.onrender.com",
 			"https://admin.troikatech.com",
 		}
