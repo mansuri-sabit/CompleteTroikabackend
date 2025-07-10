@@ -343,20 +343,33 @@ func ReactivateProject(c *gin.Context) {
 
 // GetEmbedCode - Get embeddable widget code
 func GetEmbedCode(c *gin.Context) {
-	projectID := c.Param("id")
-
-	project, err := getProjectByID(projectID)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"project_id":      projectID,
-		"embed_code":      project.EmbedCode,
-		"widget_settings": project.WidgetSettings,
-	})
+    projectID := c.Param("id")
+    
+    // Get the actual domain from environment or request
+    domain := os.Getenv("DOMAIN")
+    if domain == "" {
+        // Fallback to your actual backend domain
+        domain = "https://completetroikabackend.onrender.com"
+    }
+    
+    // Generate proper embed code
+    embedCode := fmt.Sprintf(`<script>
+(function() {
+    var script = document.createElement('script');
+    script.src = '%s/widget.js';
+    script.setAttribute('data-project-id', '%s');
+    script.async = true;
+    document.head.appendChild(script);
+})();
+</script>`, domain, projectID)
+    
+    c.JSON(http.StatusOK, gin.H{
+        "embed_code": embedCode,
+        "widget_url": fmt.Sprintf("%s/widget.js", domain),
+        "project_id": projectID,
+    })
 }
+
 
 // RegenerateEmbedCode - Generate new embed code
 func RegenerateEmbedCode(c *gin.Context) {
