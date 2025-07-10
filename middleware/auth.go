@@ -189,6 +189,7 @@ func CORSMiddleware() gin.HandlerFunc {
             "http://127.0.0.1:3000",
 			"http://192.168.1.159:3000",
 			"https://troikacompletefrontend.onrender.com",
+			"https://troika-admin-dashborad.onrender.com/",
 			"https://admin.troikatech.com",
 		}
 
