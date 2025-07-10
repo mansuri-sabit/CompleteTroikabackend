@@ -178,19 +178,19 @@ func OptionalAuthMiddleware() gin.HandlerFunc {
 }
 
 // CORSMiddleware - Enhanced CORS middleware with authentication support
+// CORSMiddleware - Enhanced CORS middleware with authentication support
 func CORSMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		origin := c.Request.Header.Get("Origin")
 
-		// Allow specific origins or all origins for development
+		// ✅ Corrected allowed origins
 		allowedOrigins := []string{
 			"http://localhost:3000",
 			"http://localhost:3001",
-            "http://127.0.0.1:3000",
+			"http://127.0.0.1:3000",
 			"http://192.168.1.159:3000",
 			"https://troikacompletefrontend.onrender.com",
-			"https://troika-admin-dashborad.onrender.com/",
-			"https://troika-admin-dashborad.onrender.com/api",
+			"https://troika-admin-dashboard.onrender.com", // ✅ Fixed typo: dashborad -> dashboard
 			"https://admin.troikatech.com",
 		}
 
@@ -203,15 +203,22 @@ func CORSMiddleware() gin.HandlerFunc {
 			}
 		}
 
-		if isAllowed || os.Getenv("ENVIRONMENT") == "development" {
+		// ✅ Enhanced origin handling
+		if isAllowed {
 			c.Header("Access-Control-Allow-Origin", origin)
+		} else if os.Getenv("ENVIRONMENT") == "development" {
+			// Allow all origins in development
+			c.Header("Access-Control-Allow-Origin", "*")
 		}
 
+		// ✅ Enhanced CORS headers
 		c.Header("Access-Control-Allow-Credentials", "true")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
-		c.Header("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE, PATCH")
+		c.Header("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, Accept, Origin, Cache-Control, X-Requested-With, X-New-Token")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+		c.Header("Access-Control-Expose-Headers", "X-New-Token, Content-Length")
 		c.Header("Access-Control-Max-Age", "86400")
 
+		// ✅ Handle preflight requests
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(http.StatusNoContent)
 			return
