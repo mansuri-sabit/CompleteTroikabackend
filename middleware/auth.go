@@ -183,26 +183,52 @@ func CORSMiddleware() gin.HandlerFunc {
     return func(c *gin.Context) {
         origin := c.Request.Header.Get("Origin")
         
-        // Always allow your frontend domain
-        if origin == "https://troika-admin-dashborad.onrender.com" {
-            c.Header("Access-Control-Allow-Origin", origin)
-        } else {
-            // For development/testing, allow all
-            c.Header("Access-Control-Allow-Origin", "*")
+        // Log CORS requests for debugging
+        log.Printf("🌐 CORS Request - Origin: %s, Method: %s, Path: %s", 
+            origin, c.Request.Method, c.Request.URL.Path)
+
+        allowedOrigins := []string{
+            "http://localhost:3000",
+            "http://localhost:3001",
+            "http://127.0.0.1:3000",
+            "https://troikacompletefrontend.onrender.com",
+            "https://troika-admin-dashborad.onrender.com",
+            "https://admin.troikatech.com",
         }
-        
+
+        isAllowed := false
+        for _, allowedOrigin := range allowedOrigins {
+            if origin == allowedOrigin {
+                isAllowed = true
+                break
+            }
+        }
+
+        if isAllowed || os.Getenv("ENVIRONMENT") == "development" {
+            c.Header("Access-Control-Allow-Origin", origin)
+            log.Printf("✅ CORS Allowed for origin: %s", origin)
+        } else {
+            log.Printf("❌ CORS Blocked for origin: %s", origin)
+        }
+
         c.Header("Access-Control-Allow-Credentials", "true")
-        c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
-        c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+        c.Header("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
+        
+        // 🔥 FIX: Explicitly include ALL HTTP methods including PATCH
+        c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD")
+        
+        c.Header("Access-Control-Max-Age", "86400")
 
         if c.Request.Method == "OPTIONS" {
-            c.AbortWithStatus(204)
+            log.Printf("🔄 CORS Preflight request handled for %s", c.Request.URL.Path)
+            c.AbortWithStatus(http.StatusNoContent)
             return
         }
 
         c.Next()
     }
 }
+
 
 
 // RateLimitMiddleware - Rate limiting middleware with user-based limits
